@@ -1,4 +1,13 @@
 const els = {
+  demoModeButton: document.querySelector("#demoModeButton"),
+  realtimeModeButton: document.querySelector("#realtimeModeButton"),
+  demoPanel: document.querySelector("#demoPanel"),
+  realtimePanel: document.querySelector("#realtimePanel"),
+  realtimeGeneratedAt: document.querySelector("#realtimeGeneratedAt"),
+  realtimeEvents: document.querySelector("#realtimeEvents"),
+  qwenReadiness: document.querySelector("#qwenReadiness"),
+  modelReadiness: document.querySelector("#modelReadiness"),
+  mcpReadiness: document.querySelector("#mcpReadiness"),
   incidentSelect: document.querySelector("#incidentSelect"),
   approvalSelect: document.querySelector("#approvalSelect"),
   runButton: document.querySelector("#runButton"),
@@ -36,6 +45,11 @@ const els = {
   recentRuns: document.querySelector("#recentRuns")
 };
 
+let currentMode = "demo";
+let realtimeTimer = null;
+
+els.demoModeButton.addEventListener("click", () => setMode("demo"));
+els.realtimeModeButton.addEventListener("click", () => setMode("realtime"));
 els.runButton.addEventListener("click", runAgents);
 els.incidentSelect.addEventListener("change", runAgents);
 els.approvalSelect.addEventListener("change", runAgents);
@@ -46,6 +60,24 @@ loadFailureOptions();
 runAgents();
 refreshOpsStatus();
 refreshDemoSiteStatus();
+
+function setMode(mode) {
+  currentMode = mode;
+  const realtime = mode === "realtime";
+  els.demoModeButton.classList.toggle("active", !realtime);
+  els.realtimeModeButton.classList.toggle("active", realtime);
+  els.demoPanel.classList.toggle("hidden", realtime);
+  els.realtimePanel.classList.toggle("hidden", !realtime);
+  els.runButton.textContent = realtime ? "Run realtime probe" : "Run agents";
+
+  if (realtime) {
+    refreshRealtimeStatus();
+    realtimeTimer = setInterval(refreshRealtimeStatus, 4000);
+  } else if (realtimeTimer) {
+    clearInterval(realtimeTimer);
+    realtimeTimer = null;
+  }
+}
 
 async function runAgents() {
   setLoading(true);
@@ -175,6 +207,54 @@ async function refreshRecentRuns() {
   }
 }
 
+async function refreshRealtimeStatus() {
+  try {
+    const status = await fetchJson("/api/realtime/status");
+    renderRealtimeStatus(status);
+  } catch (error) {
+    console.warn(error);
+    els.realtimeGeneratedAt.textContent = "offline";
+  }
+}
+
+function renderRealtimeStatus(status) {
+  els.realtimeGeneratedAt.textContent = new Date(status.generatedAt).toLocaleTimeString();
+  els.qwenReadiness.textContent = status.qwen.apiKeyConfigured ? "live credentials detected" : "simulation mode";
+
+  els.realtimeEvents.replaceChildren(...status.liveEvents.map((event) => {
+    const row = document.createElement("article");
+    row.className = "realtime-event";
+    row.innerHTML = `
+      <span>${escapeHtml(event.stage)}</span>
+      <strong>${escapeHtml(event.status)}</strong>
+      <p>${escapeHtml(event.text)}</p>
+    `;
+    return row;
+  }));
+
+  els.modelReadiness.replaceChildren(...status.qwen.readiness.map((model) => {
+    const card = document.createElement("article");
+    card.className = "readiness-card";
+    card.innerHTML = `
+      <strong>${escapeHtml(model.role)}</strong>
+      <span>${escapeHtml(model.model)}</span>
+      <em>${escapeHtml(model.status)}</em>
+    `;
+    return card;
+  }));
+
+  els.mcpReadiness.replaceChildren(...status.mcps.map((mcp) => {
+    const card = document.createElement("article");
+    card.className = "readiness-card";
+    card.innerHTML = `
+      <strong>${escapeHtml(mcp.name)}</strong>
+      <span>${escapeHtml(mcp.category)}</span>
+      <em>${escapeHtml(mcp.status)}</em>
+    `;
+    return card;
+  }));
+}
+
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
   if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
@@ -286,7 +366,11 @@ function labelFor(key) {
 
 function setLoading(isLoading) {
   els.runButton.disabled = isLoading;
-  els.runButton.textContent = isLoading ? "Running..." : "Run agents";
+  if (isLoading) {
+    els.runButton.textContent = currentMode === "realtime" ? "Probing..." : "Running...";
+  } else {
+    els.runButton.textContent = currentMode === "realtime" ? "Run realtime probe" : "Run agents";
+  }
 }
 
 function escapeHtml(value) {

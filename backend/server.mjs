@@ -405,6 +405,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/realtime/status") {
+      sendJson(res, 200, await realtimeStatus(requestId), requestId);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/demo-site/status") {
       sendJson(res, 200, demoSiteStatus(), requestId);
       return;
@@ -922,6 +927,50 @@ async function readRecentRuns(limit = 25) {
     if (error?.code === "ENOENT") return [];
     throw error;
   }
+}
+
+async function realtimeStatus(requestId) {
+  const runs = await readRecentRuns(5);
+  const latest = runs[0] || null;
+  return {
+    requestId,
+    mode: deploymentMode,
+    generatedAt: new Date().toISOString(),
+    qwen: {
+      provider: "Qwen Cloud Model Studio",
+      apiKeyConfigured: qwenApiKeyConfigured,
+      models: qwenModels,
+      readiness: Object.entries(qwenModels).map(([role, model]) => ({
+        role,
+        model,
+        status: qwenApiKeyConfigured ? "ready-for-live-call" : "simulation-mode"
+      }))
+    },
+    mcps: mcpRegistry.map((mcp) => ({
+      ...mcp,
+      status: process.env[`MCP_${mcp.id.toUpperCase()}_LIVE`] === "true" ? "live" : mcp.status
+    })),
+    latestRun: latest,
+    liveEvents: buildRealtimeEvents(latest)
+  };
+}
+
+function buildRealtimeEvents(latest) {
+  const baseline = [
+    { stage: "watch", status: "active", text: "Polling alert, log, metric, trace, runbook, and approval adapters." },
+    { stage: "models", status: qwenApiKeyConfigured ? "ready" : "simulated", text: qwenApiKeyConfigured ? "Qwen credentials detected; live model calls can be enabled." : "Qwen credentials missing; using deterministic simulation." },
+    { stage: "mcps", status: "shadow", text: `${mcpRegistry.length} MCP adapters registered. Promote adapters from simulated to live one by one.` }
+  ];
+
+  if (!latest) return baseline;
+
+  return [
+    ...baseline,
+    { stage: "latest-run", status: "observed", text: `${latest.runId} handled ${latest.incidentId} with ${latest.severity} severity.` },
+    { stage: "route", status: latest.route?.name || "unknown", text: `Route: ${latest.route?.name || "not recorded"}.` },
+    { stage: "gate", status: latest.gate, text: `Remediation branch: ${latest.gate}. ${latest.gateReason}` },
+    { stage: "verification", status: latest.verification.includes("verified") ? "healthy" : "attention", text: latest.verification }
+  ];
 }
 
 function shutdown(signal) {

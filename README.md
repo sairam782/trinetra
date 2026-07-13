@@ -31,6 +31,11 @@ Open [http://127.0.0.1:4173](http://127.0.0.1:4173).
 
 ## Demo Story
 
+Trinetra has two dashboard modes:
+
+- **Demo** - scripted storefront failures and deterministic remediation for judging.
+- **Realtime** - live operations console for model/MCP readiness, latest run state, and event stream. Use this once real Qwen calls and MCP adapters are connected.
+
 1. Choose one of five storefront failures in the **Error type** selector.
 2. Click **Inject error**.
 3. Click **Open website** and show `/demo-store` returning the selected failure.
@@ -50,6 +55,7 @@ Available failure modes:
 ```bash
 npm run check
 npm run smoke
+npm run incubate
 ```
 
 The smoke test covers:
@@ -62,12 +68,14 @@ The smoke test covers:
 - broken website injection
 - Trinetra remediation and verification
 - persisted run audit
+- realtime status endpoint
 
 ## Core Endpoints
 
 - `GET /` - Trinetra dashboard
 - `GET /demo-store` - intentionally breakable demo website
 - `GET /api/demo-site/failures` - selectable website failure catalog
+- `GET /api/realtime/status` - realtime model/MCP readiness and live event stream
 - `POST /api/demo-site/inject-error` - inject storefront failure
 - `POST /api/incidents/analyze` - run the Trinetra agent pipeline
 - `GET /api/runs` - recent persisted production runs
@@ -117,3 +125,20 @@ docker run --rm -p 4173:4173 trinetra
 - Persist audit/memory to Alibaba RDS for PostgreSQL or PolarDB.
 - Add Slack interactive approval webhook.
 - Deploy backend to Alibaba Cloud ECS or Function Compute.
+
+## Incubating Models and MCPs
+
+Run:
+
+```bash
+npm run incubate
+```
+
+The recommended order is:
+
+1. Demo simulation
+2. Qwen shadow mode
+3. Read-only MCPs
+4. Approval-gated writes
+5. Safe auto-execute
+6. Production persistence on Alibaba Cloud

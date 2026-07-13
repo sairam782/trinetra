@@ -95,6 +95,7 @@ h3 {
 .hero-stats div,
 .command-bar,
 .demo-bar,
+.realtime-panel article,
 .prod-strip,
 .incident-panel,
 .flow-panel,
@@ -131,11 +132,33 @@ dt {
 
 .command-bar {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) 240px 170px;
+  grid-template-columns: 190px minmax(260px, 1fr) 240px 170px;
   gap: 12px;
   align-items: end;
   margin: 16px 0;
   padding: 14px;
+}
+
+.mode-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0d1216;
+}
+
+.mode-switch button {
+  min-height: 34px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.mode-switch button.active {
+  color: #061115;
+  background: #7ed7ef;
 }
 
 .demo-bar {
@@ -145,6 +168,57 @@ dt {
   align-items: center;
   margin-bottom: 16px;
   padding: 16px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.realtime-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.7fr) minmax(260px, 0.8fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.realtime-panel article {
+  padding: 16px;
+}
+
+.realtime-events,
+.readiness-grid {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.realtime-event,
+.readiness-card {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.realtime-event span,
+.readiness-card span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.realtime-event p {
+  margin: 0;
+  color: #cad5db;
+}
+
+.readiness-card em {
+  color: #8ae1b5;
+  font-style: normal;
+  font-weight: 900;
 }
 
 .demo-bar h2,
@@ -641,6 +715,7 @@ dd {
 
   .command-bar,
   .demo-bar,
+  .realtime-panel,
   .prod-strip,
   .hero-stats,
   .split,

@@ -29,6 +29,7 @@ try {
   const fixedSite = await requestText("/demo-store", { expectedStatus: 200 });
   const runbooks = await requestJson("/api/runbooks");
   const alibaba = await requestJson("/api/cloud/alibaba");
+  const realtime = await requestJson("/api/realtime/status");
   const runs = await requestJson("/api/runs");
 
   assert(health.ok, "health endpoint should be ok");
@@ -48,6 +49,9 @@ try {
   assert(fixedSite.includes("Healthy homepage restored by Trinetra remediation"), "fixed storefront should render healthy page");
   assert(runbooks.some((book) => book.version && book.approved), "runbooks should be structured and versioned");
   assert(alibaba.provider === "Alibaba Cloud", "Alibaba deployment proof should be exposed");
+  assert(realtime.qwen.readiness.length >= 6, "realtime status should include model readiness");
+  assert(realtime.mcps.length >= 10, "realtime status should include MCP readiness");
+  assert(realtime.liveEvents.length >= 3, "realtime status should include live events");
   assert(runs.length >= 1, "analysis should persist a run");
   console.log("smoke test passed");
 } finally {

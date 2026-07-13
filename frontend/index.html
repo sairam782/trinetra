@@ -22,6 +22,10 @@
       </header>
 
       <section class="command-bar">
+        <div class="mode-switch" role="group" aria-label="Trinetra mode">
+          <button id="demoModeButton" class="active" type="button">Demo</button>
+          <button id="realtimeModeButton" type="button">Realtime</button>
+        </div>
         <div class="field">
           <label for="incidentSelect">Demo incident</label>
           <select id="incidentSelect">
@@ -41,7 +45,7 @@
         <button id="runButton">Run agents</button>
       </section>
 
-      <section class="demo-bar">
+      <section id="demoPanel" class="demo-bar">
         <div>
           <p class="eyebrow">Demo target website</p>
           <h2 id="demoSiteTitle">Storefront status: checking</h2>
@@ -56,6 +60,34 @@
           <a href="/demo-store" target="_blank" rel="noreferrer">Open website</a>
           <button id="solveWebsiteButton">Use Trinetra to solve</button>
         </div>
+      </section>
+
+      <section id="realtimePanel" class="realtime-panel hidden">
+        <article>
+          <div class="panel-heading">
+            <p class="eyebrow">Realtime operations</p>
+            <span id="realtimeGeneratedAt">waiting</span>
+          </div>
+          <h2>Live incident nervous system</h2>
+          <p class="muted">This mode is the production console for real Qwen calls and live MCP adapters. It shows model readiness, connector state, and the current incident decision stream.</p>
+          <div id="realtimeEvents" class="realtime-events"></div>
+        </article>
+
+        <article>
+          <div class="panel-heading">
+            <p class="eyebrow">Model readiness</p>
+            <span id="qwenReadiness">checking</span>
+          </div>
+          <div id="modelReadiness" class="readiness-grid"></div>
+        </article>
+
+        <article>
+          <div class="panel-heading">
+            <p class="eyebrow">MCP readiness</p>
+            <span>shadow to live</span>
+          </div>
+          <div id="mcpReadiness" class="readiness-grid"></div>
+        </article>
       </section>
 
       <section class="prod-strip" aria-label="Production status">
