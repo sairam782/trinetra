@@ -31,10 +31,19 @@ Open [http://127.0.0.1:4173](http://127.0.0.1:4173).
 
 ## Demo Story
 
-1. Click **Inject error**.
-2. Click **Open website** and show `/demo-store` returning an application error.
-3. Click **Use Trinetra to solve**.
-4. Trinetra runs the incident pipeline, selects `RB-777`, restores the missing storefront config, verifies `/demo-store` returns `200`, and records the full reasoning chain.
+1. Choose one of five storefront failures in the **Error type** selector.
+2. Click **Inject error**.
+3. Click **Open website** and show `/demo-store` returning the selected failure.
+4. Click **Use Trinetra to solve**.
+5. Trinetra runs the incident pipeline, selects `RB-777`, applies the matching storefront remediation, verifies `/demo-store` returns healthy, and records the full reasoning chain.
+
+Available failure modes:
+
+- Missing featured-products config
+- Catalog API timeout
+- Payment widget script crash
+- Inventory schema drift
+- CSS asset 404 / visual regression
 
 ## Verification
 
@@ -58,6 +67,7 @@ The smoke test covers:
 
 - `GET /` - Trinetra dashboard
 - `GET /demo-store` - intentionally breakable demo website
+- `GET /api/demo-site/failures` - selectable website failure catalog
 - `POST /api/demo-site/inject-error` - inject storefront failure
 - `POST /api/incidents/analyze` - run the Trinetra agent pipeline
 - `GET /api/runs` - recent persisted production runs

@@ -157,6 +157,20 @@ dt {
   flex-wrap: wrap;
   gap: 10px;
   justify-content: end;
+  align-items: end;
+}
+
+.failure-picker {
+  min-width: 270px;
+  display: grid;
+  gap: 6px;
+}
+
+.failure-picker span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
 }
 
 .demo-actions a {
@@ -646,7 +660,8 @@ dd {
   }
 
   .demo-actions a,
-  .demo-actions button {
+  .demo-actions button,
+  .failure-picker {
     width: 100%;
   }
 }

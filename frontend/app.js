@@ -2,6 +2,7 @@ const els = {
   incidentSelect: document.querySelector("#incidentSelect"),
   approvalSelect: document.querySelector("#approvalSelect"),
   runButton: document.querySelector("#runButton"),
+  failureSelect: document.querySelector("#failureSelect"),
   injectErrorButton: document.querySelector("#injectErrorButton"),
   solveWebsiteButton: document.querySelector("#solveWebsiteButton"),
   demoSiteTitle: document.querySelector("#demoSiteTitle"),
@@ -41,6 +42,7 @@ els.approvalSelect.addEventListener("change", runAgents);
 els.injectErrorButton.addEventListener("click", injectDemoError);
 els.solveWebsiteButton.addEventListener("click", solveWebsiteIncident);
 
+loadFailureOptions();
 runAgents();
 refreshOpsStatus();
 refreshDemoSiteStatus();
@@ -120,17 +122,38 @@ async function refreshOpsStatus() {
 async function refreshDemoSiteStatus() {
   try {
     const status = await fetchJson("/api/demo-site/status");
+    if (status.failureId && els.failureSelect.value !== status.failureId) {
+      els.failureSelect.value = status.failureId;
+    }
     els.demoSiteTitle.textContent = `Storefront status: ${status.healthy ? "healthy" : "broken"}`;
     els.demoSiteText.textContent = status.healthy
-      ? `Recovered. /demo-store returns ${status.httpStatus}. Last fixed: ${status.lastFixedAt || "not yet"}.`
-      : `Injected fault active. /demo-store returns ${status.httpStatus}: ${status.error}.`;
+      ? `Recovered from ${status.failureLabel}. /demo-store returns ${status.httpStatus}. Last fixed: ${status.lastFixedAt || "not yet"}.`
+      : `${status.failureLabel} active. /demo-store returns ${status.httpStatus}: ${status.error}. ${status.symptom}`;
   } catch {
     els.demoSiteTitle.textContent = "Storefront status: unknown";
   }
 }
 
+async function loadFailureOptions() {
+  try {
+    const failures = await fetchJson("/api/demo-site/failures");
+    els.failureSelect.replaceChildren(...failures.map((failure) => {
+      const option = document.createElement("option");
+      option.value = failure.id;
+      option.textContent = `${failure.label} (${failure.httpStatus})`;
+      return option;
+    }));
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
 async function injectDemoError() {
-  await fetchJson("/api/demo-site/inject-error", { method: "POST" });
+  await fetchJson("/api/demo-site/inject-error", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ failureId: els.failureSelect.value })
+  });
   els.incidentSelect.value = "website";
   els.approvalSelect.value = "pending";
   await refreshDemoSiteStatus();

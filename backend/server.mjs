@@ -34,9 +34,107 @@ const qwenModels = {
 const dedupeWindowMs = Number(process.env.DEDUPE_WINDOW_MS || 180_000);
 const verificationTimeoutMs = Number(process.env.VERIFICATION_TIMEOUT_MS || 30_000);
 const dedupeCache = new Map();
+const demoFailures = {
+  missingConfig: {
+    id: "missingConfig",
+    label: "Missing featured-products config",
+    httpStatus: 500,
+    error: "ReferenceError: FEATURED_PRODUCTS is not defined",
+    symptom: "Homepage render crashes before product cards mount.",
+    rootCause: "Storefront render crash caused by missing FEATURED_PRODUCTS config",
+    trace: "Failed render span terminates inside ProductGrid config lookup",
+    metricFinding: "Synthetic homepage check is failing with HTTP 500",
+    runbookTitle: "Restore demo storefront feature config",
+    fixSummary: "Restored FEATURED_PRODUCTS config and synthetic homepage check.",
+    logs: [
+      "demo-storefront error ReferenceError: FEATURED_PRODUCTS is not defined",
+      "demo-storefront warn render failed in ProductGrid",
+      "synthetic-check error GET /demo-store expected 200 got 500",
+      "deploy-bot info config flag featured_products removed"
+    ],
+    metrics: { errorRate: 42.5, p95LatencyMs: 990, syntheticStatus: 500, deployDeltaMin: 2, saturation: 31 }
+  },
+  apiTimeout: {
+    id: "apiTimeout",
+    label: "Catalog API timeout",
+    httpStatus: 504,
+    error: "GatewayTimeout: catalog-api exceeded 2500ms budget",
+    symptom: "Homepage shell loads but product feed times out.",
+    rootCause: "Catalog API timeout is preventing product hydration",
+    trace: "Slowest span is demo-storefront -> catalog-api listFeaturedProducts",
+    metricFinding: "Synthetic homepage check is failing with HTTP 504 and high p95 latency",
+    runbookTitle: "Reduce storefront catalog timeout and serve cached products",
+    fixSummary: "Enabled cached product fallback and reduced catalog timeout budget.",
+    logs: [
+      "demo-storefront error GatewayTimeout: catalog-api exceeded 2500ms budget",
+      "catalog-api warn upstream search-index p95 above 2200ms",
+      "synthetic-check error GET /demo-store expected 200 got 504",
+      "edge-cache info product fallback disabled by stale flag"
+    ],
+    metrics: { errorRate: 28.4, p95LatencyMs: 3120, syntheticStatus: 504, deployDeltaMin: 6, saturation: 67 }
+  },
+  paymentScript: {
+    id: "paymentScript",
+    label: "Payment widget script crash",
+    httpStatus: 500,
+    error: "TypeError: window.Payments.mountCheckout is not a function",
+    symptom: "Product cards render, but checkout CTA crashes the page.",
+    rootCause: "Payment widget version mismatch is crashing checkout bootstrap",
+    trace: "Failed client span terminates inside CheckoutWidget bootstrap",
+    metricFinding: "Checkout-start errors spiked while homepage synthetic check returns HTTP 500",
+    runbookTitle: "Pin payment widget to last known good version",
+    fixSummary: "Pinned payment widget bundle and reloaded checkout bootstrap.",
+    logs: [
+      "demo-storefront error TypeError: window.Payments.mountCheckout is not a function",
+      "cdn-loader warn payments-widget@next returned incompatible export",
+      "synthetic-check error click checkout expected modal got exception",
+      "deploy-bot info script tag changed from payments@stable to payments@next"
+    ],
+    metrics: { errorRate: 35.7, p95LatencyMs: 760, syntheticStatus: 500, deployDeltaMin: 4, saturation: 24 }
+  },
+  inventoryDrift: {
+    id: "inventoryDrift",
+    label: "Inventory schema drift",
+    httpStatus: 500,
+    error: "SchemaError: expected inventory.available, received stock.available_to_promise",
+    symptom: "Inventory badges fail and product cards cannot render availability.",
+    rootCause: "Inventory response schema drift broke availability mapping",
+    trace: "Failed render span terminates inside InventoryBadge mapper",
+    metricFinding: "Inventory mapping failures are producing HTTP 500 responses",
+    runbookTitle: "Apply inventory compatibility mapper",
+    fixSummary: "Applied compatibility mapper for stock.available_to_promise.",
+    logs: [
+      "demo-storefront error SchemaError: expected inventory.available",
+      "inventory-api info response schema=v3 stock.available_to_promise",
+      "demo-storefront warn InventoryBadge mapper rejected 12 products",
+      "synthetic-check error GET /demo-store expected 200 got 500"
+    ],
+    metrics: { errorRate: 31.2, p95LatencyMs: 840, syntheticStatus: 500, deployDeltaMin: 9, saturation: 38 }
+  },
+  cssAsset: {
+    id: "cssAsset",
+    label: "CSS asset 404",
+    httpStatus: 200,
+    error: "AssetError: /assets/storefront-critical.css returned 404",
+    symptom: "Homepage returns 200 but layout is visually broken and checkout CTA is hidden.",
+    rootCause: "Critical CSS asset 404 caused a visual regression",
+    trace: "Synthetic visual check fails after critical CSS asset request",
+    metricFinding: "Visual regression score failed while HTTP status stayed 200",
+    runbookTitle: "Restore critical storefront CSS asset",
+    fixSummary: "Republished critical CSS asset and purged stale CDN manifest.",
+    logs: [
+      "cdn error /assets/storefront-critical.css returned 404",
+      "demo-storefront warn critical css missing; rendering unstyled fallback",
+      "synthetic-check error visual diff score 0.41 over threshold 0.12",
+      "deploy-bot info asset manifest hash changed without css upload"
+    ],
+    metrics: { errorRate: 8.1, p95LatencyMs: 240, syntheticStatus: 200, visualDiffScore: 0.41, deployDeltaMin: 3, saturation: 18 }
+  }
+};
 const demoSiteState = {
   broken: true,
-  error: "ReferenceError: FEATURED_PRODUCTS is not defined",
+  failureId: "missingConfig",
+  error: demoFailures.missingConfig.error,
   lastInjectedAt: new Date().toISOString(),
   lastFixedAt: null
 };
@@ -216,8 +314,8 @@ const runbooks = [
     actionType: "restore_website_config",
     blastRadius: "single-service",
     rollback: "re-apply broken config snapshot for demonstration reset only",
-    match: ["featured_products", "ReferenceError", "synthetic check", "homepage"],
-    steps: ["restore FEATURED_PRODUCTS config", "reload storefront process", "verify /demo-store returns 200"]
+    match: ["featured_products", "ReferenceError", "synthetic check", "homepage", "catalog", "payment", "inventory", "css", "visual"],
+    steps: ["restore the failed storefront dependency/config", "reload storefront process", "verify /demo-store returns healthy"]
   }
 ];
 
@@ -312,8 +410,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/demo-site/failures") {
+      sendJson(res, 200, Object.values(demoFailures).map(({ id, label, httpStatus, symptom }) => ({ id, label, httpStatus, symptom })), requestId);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/demo-site/inject-error") {
-      injectDemoSiteError();
+      const body = await readJson(req);
+      injectDemoSiteError(body.failureId);
       sendJson(res, 200, demoSiteStatus(), requestId);
       return;
     }
@@ -359,7 +463,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/demo-store") {
       const html = renderDemoStore();
-      res.writeHead(demoSiteState.broken ? 500 : 200, securityHeaders({
+      res.writeHead(demoSiteStatus().httpStatus, securityHeaders({
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store"
       }, requestId));
@@ -445,8 +549,28 @@ function validateAnalyzeRequest(body) {
   return { incidentKey, approval, approverId };
 }
 
+function currentDemoFailure() {
+  return demoFailures[demoSiteState.failureId] || demoFailures.missingConfig;
+}
+
+function buildWebsiteIncident() {
+  const failure = currentDemoFailure();
+  return {
+    ...incidents.website,
+    title: `Trinetra demo storefront: ${failure.label}`,
+    alert: `Synthetic check /demo-store detected ${failure.label.toLowerCase()}`,
+    customerImpact: failure.symptom,
+    logs: failure.logs.map((line, index) => `2026-07-13T09:0${index}:1${index}Z ${line}`),
+    metrics: {
+      ...failure.metrics,
+      affectedRegions: ["local-demo"]
+    },
+    demoFailure: failure
+  };
+}
+
 function orchestrateIncident({ incidentKey = "latency", approval = "pending", approverId = slackApproverAllowlist[0] }, requestId = crypto.randomUUID()) {
-  const incident = incidents[incidentKey] || incidents.latency;
+  const incident = incidentKey === "website" ? buildWebsiteIncident() : incidents[incidentKey] || incidents.latency;
   const runStartedAt = new Date().toISOString();
   const audit = [];
   const mcpTrace = [];
@@ -834,7 +958,7 @@ function runLogsAgent(incident, trace) {
   if (/pool exhausted|retry storm/i.test(joined)) finding = "Database pool exhaustion amplified by retry storm";
   if (/temp files|disk/i.test(joined)) finding = "Temp-file growth is consuming database disk";
   if (/jwt|schema|kid not found/i.test(joined)) finding = "Token schema/key mismatch started after deploy";
-  if (/FEATURED_PRODUCTS|ReferenceError|ProductGrid/i.test(joined)) finding = "Storefront render crash caused by missing FEATURED_PRODUCTS config";
+  if (incident.demoFailure) finding = incident.demoFailure.rootCause;
   return runQwenAgent("logs", { logs: incident.logs }, () => ({
     agent: "Logs agent",
     finding,
@@ -852,7 +976,7 @@ function runMetricsAgent(incident, trace) {
   if (m.p95LatencyMs > 1500 && m.saturation > 85) finding = `Saturation ${m.saturation}% aligns with latency ${m.p95LatencyMs}ms`;
   if (m.diskUsedPct > 90) finding = `Disk usage ${m.diskUsedPct}% is above the hard pressure threshold`;
   if (m.errorRate > 10 && m.deployDeltaMin < 10) finding = `Error rate ${m.errorRate}% jumped ${m.deployDeltaMin} minutes after deploy`;
-  if (m.syntheticStatus === 500) finding = "Synthetic homepage check is failing with HTTP 500";
+  if (incident.demoFailure) finding = incident.demoFailure.metricFinding;
   return runQwenAgent("metrics", m, () => ({
     agent: "Metrics agent",
     finding,
@@ -869,7 +993,7 @@ function runTraceAgent(incident, trace) {
   if (incident.service === "checkout-api") finding = "Slowest span is checkout-api -> checkout-db acquire_connection";
   if (incident.service === "orders-db") finding = "Trace fanout points to reporting query temp-file pressure";
   if (incident.service === "identity-edge") finding = "Failed auth spans terminate at token validation middleware";
-  if (incident.service === "demo-storefront") finding = "Failed render span terminates inside ProductGrid config lookup";
+  if (incident.demoFailure) finding = incident.demoFailure.trace;
   return runQwenAgent("traces", incident.service, () => ({
     agent: "Trace agent",
     finding,
@@ -921,7 +1045,7 @@ function normalizeHypothesis(finding) {
   if (/pool|retry|latency/i.test(finding)) return "capacity-latency";
   if (/disk|temp/i.test(finding)) return "disk-pressure";
   if (/token|jwt|auth|schema/i.test(finding)) return "auth-deploy";
-  if (/storefront|FEATURED_PRODUCTS|homepage|ProductGrid|synthetic/i.test(finding)) return "website-config";
+  if (/storefront|FEATURED_PRODUCTS|homepage|ProductGrid|synthetic|catalog|payment|inventory|css|visual/i.test(finding)) return "website-config";
   return "unknown";
 }
 
@@ -1002,6 +1126,7 @@ function verifyOutcome(incident, gate) {
   }
 
   if (incident.service === "demo-storefront" && ["auto", "approved"].includes(gate.kind)) {
+    const failure = incident.demoFailure || currentDemoFailure();
     fixDemoSite();
     const status = demoSiteStatus();
     if (!status.healthy) {
@@ -1018,7 +1143,7 @@ function verifyOutcome(incident, gate) {
       status: "Fix verified; /demo-store recovered",
       confidence: 0.95,
       after: { ...incident.metrics, syntheticStatus: 200, errorRate: 0.2, p95LatencyMs: 180 },
-      reason: "Trinetra restored FEATURED_PRODUCTS config and synthetic check returned 200",
+      reason: `Trinetra applied ${failure.runbookTitle}: ${failure.fixSummary}`,
       rollbackTriggered: false
     };
   }
@@ -1068,18 +1193,24 @@ function buildStatusUpdate(incident, commander, gate, verification) {
 }
 
 function demoSiteStatus() {
+  const failure = currentDemoFailure();
   return {
     healthy: !demoSiteState.broken,
-    httpStatus: demoSiteState.broken ? 500 : 200,
+    failureId: failure.id,
+    failureLabel: failure.label,
+    httpStatus: demoSiteState.broken ? failure.httpStatus : 200,
     error: demoSiteState.broken ? demoSiteState.error : null,
+    symptom: demoSiteState.broken ? failure.symptom : "Storefront is healthy",
     lastInjectedAt: demoSiteState.lastInjectedAt,
     lastFixedAt: demoSiteState.lastFixedAt
   };
 }
 
-function injectDemoSiteError() {
+function injectDemoSiteError(failureId = "missingConfig") {
+  const failure = demoFailures[failureId] || demoFailures.missingConfig;
   demoSiteState.broken = true;
-  demoSiteState.error = "ReferenceError: FEATURED_PRODUCTS is not defined";
+  demoSiteState.failureId = failure.id;
+  demoSiteState.error = failure.error;
   demoSiteState.lastInjectedAt = new Date().toISOString();
   demoSiteState.lastFixedAt = null;
 }
@@ -1091,6 +1222,7 @@ function fixDemoSite() {
 }
 
 function renderDemoStore() {
+  const failure = currentDemoFailure();
   if (demoSiteState.broken) {
     return `<!doctype html>
 <html lang="en">
@@ -1099,19 +1231,37 @@ function renderDemoStore() {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Demo Store - Error</title>
     <style>
-      body{margin:0;font-family:Inter,system-ui,sans-serif;background:#120b0d;color:#fff;display:grid;place-items:center;min-height:100vh}
-      main{width:min(760px,calc(100% - 32px));border:1px solid #79333b;background:#221014;border-radius:12px;padding:28px}
+      body{margin:0;font-family:Inter,system-ui,sans-serif;background:#120b0d;color:#fff;min-height:100vh}
+      header{padding:22px 28px;border-bottom:1px solid #4b2028;background:#190d10}
+      main{width:min(1120px,calc(100% - 32px));margin:34px auto;display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:22px}
+      section,aside{border:1px solid #79333b;background:#221014;border-radius:12px;padding:24px}
+      .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px;opacity:.32;filter:grayscale(1)}
+      .tile{min-height:120px;border:1px solid #5c2a31;border-radius:10px;background:#170b0e;padding:14px}
       code{display:block;margin-top:14px;padding:14px;background:#090506;color:#ffb7bf;border-radius:8px;white-space:normal}
-      a{color:#8de6ff}
+      a{color:#8de6ff}.badge{display:inline-block;padding:6px 10px;border-radius:999px;background:#5f1824;color:#ffbdc4;font-weight:800}
+      @media(max-width:820px){main{grid-template-columns:1fr}.grid{grid-template-columns:1fr}}
     </style>
   </head>
   <body>
+    <header><strong>Northstar Outdoor Co.</strong> <span class="badge">Synthetic check failed: ${failure.httpStatus}</span></header>
     <main>
+      <section>
       <p>Demo storefront</p>
-      <h1>Application error</h1>
-      <p>The homepage cannot render because the featured products configuration was removed.</p>
+      <h1>${failure.label}</h1>
+      <p>${failure.symptom}</p>
       <code>${demoSiteState.error}</code>
       <p><a href="/">Open Trinetra</a> to diagnose and remediate this incident.</p>
+      <div class="grid">
+        <div class="tile"><h3>Trail Pack</h3><p>Unavailable while incident is active.</p></div>
+        <div class="tile"><h3>Storm Shell</h3><p>Checkout disabled.</p></div>
+        <div class="tile"><h3>Camp Lantern</h3><p>Inventory hidden.</p></div>
+      </div>
+      </section>
+      <aside>
+        <h2>Incident signal</h2>
+        <p>${failure.metricFinding}</p>
+        <p><strong>Likely fix:</strong> ${failure.runbookTitle}</p>
+      </aside>
     </main>
   </body>
 </html>`;
@@ -1124,26 +1274,47 @@ function renderDemoStore() {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Demo Store</title>
     <style>
-      body{margin:0;font-family:Inter,system-ui,sans-serif;background:#f5f7f8;color:#101820}
-      header{padding:48px 24px;background:#101820;color:white}
-      main{width:min(1040px,100%);margin:0 auto;padding:28px 20px}
+      body{margin:0;font-family:Inter,system-ui,sans-serif;background:#f3f6f5;color:#101820}
+      nav{height:64px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;background:white;border-bottom:1px solid #dde5e2;position:sticky;top:0}
+      nav strong{font-size:1.05rem}.links{display:flex;gap:18px;color:#60706a;font-weight:700}
+      header{padding:76px 28px;background:linear-gradient(135deg,#10251f,#295a48);color:white}
+      header div{width:min(1120px,100%);margin:0 auto}
+      h1{font-size:clamp(2.6rem,7vw,5.8rem);line-height:.92;margin:10px 0 18px}
+      .hero-copy{max-width:680px;color:#d7ebe3;font-size:1.1rem;line-height:1.55}
+      main{width:min(1120px,100%);margin:0 auto;padding:28px 20px 46px}
+      .toolbar{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:18px}
+      .status{padding:8px 12px;border-radius:999px;background:#dff7e8;color:#0b7a53;font-weight:900}
       .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
-      article{border:1px solid #d7dde2;background:white;border-radius:10px;padding:18px}
-      span{display:inline-block;margin-top:14px;font-weight:800;color:#0b7a53}
+      article{border:1px solid #d7dde2;background:white;border-radius:10px;overflow:hidden;box-shadow:0 12px 28px rgb(16 24 32 / 8%)}
+      .photo{height:170px;background:linear-gradient(135deg,#dbe8e2,#8fb2a2);display:grid;place-items:center;font-size:3rem}
+      article div:not(.photo){padding:18px}
+      span{display:inline-block;margin-top:14px;font-weight:900;color:#0b7a53}
+      button{margin-top:14px;width:100%;height:40px;border:0;border-radius:6px;background:#101820;color:white;font-weight:900}
+      footer{padding:24px 28px;border-top:1px solid #dde5e2;color:#60706a;background:white}
       @media(max-width:760px){.grid{grid-template-columns:1fr}}
     </style>
   </head>
   <body>
+    <nav>
+      <strong>Northstar Outdoor Co.</strong>
+      <div class="links"><span>Gear</span><span>Trips</span><span>Journal</span></div>
+    </nav>
     <header>
-      <p>Demo storefront</p>
-      <h1>Featured recovery products</h1>
-      <p>Healthy homepage restored by Trinetra remediation.</p>
+      <div>
+        <p>Recovered storefront</p>
+        <h1>Trail-ready gear, back online.</h1>
+        <p class="hero-copy">Healthy homepage restored by Trinetra remediation. Product discovery, inventory, checkout scripts, and critical styling are all passing synthetic checks.</p>
+      </div>
     </header>
-    <main class="grid">
-      <article><h2>Incident Notebook</h2><p>Capture every decision chain.</p><span>$29</span></article>
-      <article><h2>On-call Mug</h2><p>For long nights and clean rollbacks.</p><span>$18</span></article>
-      <article><h2>Runbook Deck</h2><p>Approved fixes, ready to execute.</p><span>$42</span></article>
+    <main>
+      <div class="toolbar"><h2>Featured products</h2><div class="status">Synthetic check: 200 OK</div></div>
+      <section class="grid">
+        <article><div class="photo">🎒</div><div><h2>Ridge Pack 32L</h2><p>Balanced trail storage with weatherproof zips.</p><span>$129</span><button>Add to cart</button></div></article>
+        <article><div class="photo">🧥</div><div><h2>Stormline Shell</h2><p>Lightweight protection for unpredictable weather.</p><span>$188</span><button>Add to cart</button></div></article>
+        <article><div class="photo">🏕️</div><div><h2>Camp Lantern Pro</h2><p>Warm, packable light with 36-hour battery life.</p><span>$64</span><button>Add to cart</button></div></article>
+      </section>
     </main>
+    <footer>Inventory synced · Checkout widget healthy · Critical CSS loaded</footer>
   </body>
 </html>`;
 }

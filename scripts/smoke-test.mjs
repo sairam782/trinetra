@@ -15,8 +15,12 @@ try {
     method: "POST",
     body: JSON.stringify({ incidentKey: "deploy", approval: "approved", approverId: "U-HACK-JUDGE" })
   });
-  await requestJson("/api/demo-site/inject-error", { method: "POST" });
-  const brokenSite = await requestText("/demo-store", { expectedStatus: 500 });
+  const failures = await requestJson("/api/demo-site/failures");
+  await requestJson("/api/demo-site/inject-error", {
+    method: "POST",
+    body: JSON.stringify({ failureId: "apiTimeout" })
+  });
+  const brokenSite = await requestText("/demo-store", { expectedStatus: 504 });
   const websiteAnalysis = await requestJson("/api/incidents/analyze", {
     method: "POST",
     body: JSON.stringify({ incidentKey: "website", approval: "approved", approverId: "U-HACK-JUDGE" })
@@ -36,7 +40,8 @@ try {
   assert(analysis.route.name === "P1 fast-path", "deploy scenario should route to P1 fast-path");
   assert(analysis.adjudication.reasoning, "analysis should include adjudication reasoning");
   assert(analysis.gate.reason, "analysis should include remediation gate reason");
-  assert(brokenSite.includes("Application error"), "demo storefront should expose injected error");
+  assert(failures.length >= 5, "demo storefront should expose at least five injectable failures");
+  assert(brokenSite.includes("Catalog API timeout"), "demo storefront should expose selected injected error");
   assert(websiteAnalysis.triage.runbook.id === "RB-777", "website incident should select the storefront config runbook");
   assert(websiteAnalysis.verification.status.includes("/demo-store recovered"), "website remediation should verify recovery");
   assert(fixedStatus.healthy, "demo storefront should be healthy after Trinetra remediation");
