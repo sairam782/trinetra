@@ -1,0 +1,13 @@
+{
+  "name": "trinetra",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node backend/server.mjs",
+    "dev": "node backend/server.mjs",
+    "start:prod": "NODE_ENV=production HOST=0.0.0.0 node backend/server.mjs",
+    "check": "node --check backend/server.mjs && node --check frontend/app.js && node --check scripts/smoke-test.mjs",
+    "smoke": "node scripts/smoke-test.mjs"
+  }
+}
