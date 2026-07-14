@@ -16,6 +16,10 @@ trinetra/
     styles.css                 # Dashboard styling
   scripts/
     smoke-test.mjs             # End-to-end smoke test
+    setup-env.mjs              # Local .env writer for API keys and MCP toggles
+    validate-env.mjs           # Secret-safe readiness checker
+  docs/
+    API_KEYS_AND_MCPS.md       # Full key/MCP setup guide
   data/                        # Runtime JSONL audit + memory store, gitignored
   Dockerfile
   package.json
@@ -120,6 +124,15 @@ Copy `.env.example` when you are ready to wire real services:
 cp .env.example .env
 ```
 
+Or use the setup helper:
+
+```bash
+npm run env:setup:interactive
+npm run env:check
+```
+
+Full guide: [docs/API_KEYS_AND_MCPS.md](docs/API_KEYS_AND_MCPS.md)
+
 Important variables:
 
 - `QWEN_API_KEY` or `DASHSCOPE_API_KEY`
@@ -131,6 +144,7 @@ Important variables:
 - `AUTO_EXECUTE_CONFIDENCE_THRESHOLD`
 - `RUNBOOK_ALLOWLIST`
 - `SLACK_APPROVER_IDS`
+- `MCP_*_LIVE`
 
 ## Container
 
