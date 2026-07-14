@@ -7,7 +7,8 @@ Trinetra is a Qwen-native autonomous incident response system for the Qwen Cloud
 ```text
 trinetra/
   backend/
-    server.mjs                 # Node API, orchestrator, remediation simulator
+    server.mjs                 # Node API, async orchestrator, gated remediation executor
+    cloud/qwen-client.mjs      # DashScope/OpenAI-compatible Qwen client
     cloud/alibaba-client.mjs   # Alibaba Cloud deployment proof seam
   frontend/
     index.html                 # Trinetra dashboard
@@ -40,8 +41,9 @@ Trinetra has two dashboard modes:
 2. Choose one of five storefront failures in the **Error type** selector.
 3. Click **Inject error**.
 4. Click **Open website** and show `/demo-store` returning the selected failure.
-5. Click **Use Trinetra to solve**.
-6. Trinetra runs the incident pipeline, selects `RB-777`, passes the selected failure into the remediation executor, applies the matching storefront action, verifies `/demo-store` returns healthy, and records the full reasoning chain.
+5. Click **Run Trinetra pipeline**.
+6. Trinetra runs the incident pipeline, selects `RB-777`, passes the selected failure into the remediation executor, and records the full reasoning chain.
+7. By default, execution is dry-run only, so `/demo-store` stays broken while Trinetra shows the planned action. Set `REMEDIATION_EXECUTION_MODE=execute` only when you want the executor to mutate the target website.
 
 Available failure modes:
 
@@ -67,7 +69,7 @@ The smoke test covers:
 - MCP registry
 - structured runbooks
 - broken website injection
-- Trinetra remediation and verification
+- dry-run remediation planning and verification
 - persisted run audit
 - realtime status endpoint
 
@@ -94,6 +96,22 @@ The smoke test covers:
 
 Local runs are deterministic without credentials, but each agent call still records model, token estimate, confidence, latency, fallback state, MCP action, and reasoning.
 
+To enable real Qwen calls through Alibaba Cloud Model Studio / DashScope compatible mode:
+
+```bash
+QWEN_API_KEY=your_key_here \
+QWEN_LIVE_CALLS=true \
+npm start
+```
+
+To also allow Trinetra to mutate the demo website after the runbook gate:
+
+```bash
+REMEDIATION_EXECUTION_MODE=execute npm start
+```
+
+Keep `REMEDIATION_EXECUTION_MODE=dry-run` for judging walkthroughs where you want to show diagnosis and approval without automatically fixing the injected failure.
+
 ## Environment
 
 Copy `.env.example` when you are ready to wire real services:
@@ -106,6 +124,8 @@ Important variables:
 
 - `QWEN_API_KEY` or `DASHSCOPE_API_KEY`
 - `QWEN_API_BASE_URL`
+- `QWEN_LIVE_CALLS`
+- `REMEDIATION_EXECUTION_MODE`
 - `ALIBABA_CLOUD_REGION`
 - `ALIBABA_RDS_POSTGRES_URL`
 - `AUTO_EXECUTE_CONFIDENCE_THRESHOLD`

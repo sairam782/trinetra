@@ -221,7 +221,9 @@ async function refreshRealtimeStatus() {
 
 function renderRealtimeStatus(status) {
   els.realtimeGeneratedAt.textContent = new Date(status.generatedAt).toLocaleTimeString();
-  els.qwenReadiness.textContent = status.qwen.apiKeyConfigured ? "live credentials detected" : "simulation mode";
+  els.qwenReadiness.textContent = status.qwen.liveEnabled
+    ? "live Qwen calls enabled"
+    : status.qwen.apiKeyConfigured ? "Qwen shadow mode" : "local fallback";
 
   els.realtimeEvents.replaceChildren(...status.liveEvents.map((event) => {
     const row = document.createElement("article");

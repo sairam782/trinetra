@@ -5,6 +5,7 @@ import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAlibabaDeploymentProof } from "./cloud/alibaba-client.mjs";
+import { qwenChatJson, qwenRuntimeConfig } from "./cloud/qwen-client.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = join(__dirname, "..");
@@ -21,6 +22,8 @@ const autoExecuteThreshold = Number(process.env.AUTO_EXECUTE_CONFIDENCE_THRESHOL
 const approvedRunbookAllowlist = new Set((process.env.RUNBOOK_ALLOWLIST || "RB-101,RB-204,RB-330,RB-401,RB-510,RB-777").split(",").map((item) => item.trim()).filter(Boolean));
 const slackApproverAllowlist = (process.env.SLACK_APPROVER_IDS || "U-HACK-JUDGE,U-ONCALL-PRIMARY").split(",").map((item) => item.trim()).filter(Boolean);
 const qwenApiKeyConfigured = Boolean(process.env.QWEN_API_KEY || process.env.DASHSCOPE_API_KEY);
+const qwenConfig = qwenRuntimeConfig();
+const remediationExecutionMode = process.env.REMEDIATION_EXECUTION_MODE || "dry-run";
 const qwenModels = {
   commander: "qwen3.6-plus",
   logs: "qwen3.6-flash",
@@ -398,7 +401,8 @@ const server = http.createServer(async (req, res) => {
           mcpAdapters: mcpRegistry.length,
           auditPersistence: true,
           qwenModelTiering: qwenModels,
-          qwenApiKeyConfigured,
+          qwenRuntime: qwenConfig,
+          remediationExecutionMode,
           alibabaDeploymentProof: true
         },
         requestId
@@ -462,7 +466,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/api/incidents/analyze") {
       const body = await readJson(req);
-      const result = orchestrateIncident(validateAnalyzeRequest(body), requestId);
+      const result = await orchestrateIncident(validateAnalyzeRequest(body), requestId);
       await persistRun(result);
       sendJson(res, 200, result, requestId);
       return;
@@ -576,7 +580,7 @@ function buildWebsiteIncident() {
   };
 }
 
-function orchestrateIncident({ incidentKey = "latency", approval = "pending", approverId = slackApproverAllowlist[0] }, requestId = crypto.randomUUID()) {
+async function orchestrateIncident({ incidentKey = "latency", approval = "pending", approverId = slackApproverAllowlist[0] }, requestId = crypto.randomUUID()) {
   const incident = incidentKey === "website" ? buildWebsiteIncident() : incidents[incidentKey] || incidents.latency;
   const runStartedAt = new Date().toISOString();
   const audit = [];
@@ -592,7 +596,7 @@ function orchestrateIncident({ incidentKey = "latency", approval = "pending", ap
     mcp: useMcp(mcpTrace, "alerts", "deduplicate", `${incident.id} grouped by service and region`)
   });
 
-  const commander = runCommander(incident);
+  const commander = await runCommander(incident);
   const route = routeIncident(commander, dedupe);
   logCall(audit, "Commander agent", {
     input: ingestion.output,
@@ -606,10 +610,12 @@ function orchestrateIncident({ incidentKey = "latency", approval = "pending", ap
     mcp: useMcp(mcpTrace, "tickets", "create_incident", `${incident.id} severity field set to ${commander.severity}`)
   });
 
-  const logs = runLogsAgent(incident, mcpTrace);
-  const metrics = runMetricsAgent(incident, mcpTrace);
-  const traces = route.fastPath ? null : runTraceAgent(incident, mcpTrace);
-  const memory = runMemoryAgent(incident, mcpTrace);
+  const [logs, metrics, traces, memory] = await Promise.all([
+    runLogsAgent(incident, mcpTrace),
+    runMetricsAgent(incident, mcpTrace),
+    route.fastPath ? Promise.resolve(null) : runTraceAgent(incident, mcpTrace),
+    runMemoryAgent(incident, mcpTrace)
+  ]);
   const specialists = [logs, metrics, traces, memory].filter(Boolean);
   if (route.fastPath) {
     logCall(audit, "Fast-path notification", {
@@ -744,7 +750,7 @@ function orchestrateIncident({ incidentKey = "latency", approval = "pending", ap
     requestId,
     startedAt: runStartedAt,
     mode: deploymentMode,
-    qwen: { provider: "Qwen Cloud Model Studio", models: qwenModels, apiKeyConfigured: qwenApiKeyConfigured },
+    qwen: { provider: "Qwen Cloud Model Studio", models: qwenModels, runtime: qwenConfig, apiKeyConfigured: qwenApiKeyConfigured },
     alibaba: getAlibabaDeploymentProof(),
     route,
     dedupe,
@@ -823,19 +829,47 @@ function routeIncident(commander, dedupe) {
   return { name: "P2-P4 standard", fastPath: false, reason: "Severity allows full specialist enrichment before remediation gate" };
 }
 
-function runQwenAgent(role, input, buildOutput) {
+async function runQwenAgent(role, input, buildOutput) {
   const model = qwenModels[role] || qwenModels.triage;
   const forcedFailure = process.env.FORCE_QWEN_FAILURE_ROLE === role || process.env.FORCE_QWEN_FAILURE_ROLE === "all";
-  const attempts = forcedFailure ? 2 : 1;
-  const fallback = forcedFailure ? `Qwen ${model} timed out or returned malformed output twice; used deterministic fallback` : null;
-  const output = buildOutput();
+  const fallback = buildOutput();
+  if (forcedFailure) {
+    return {
+      ...fallback,
+      model,
+      provider: "local-fallback",
+      tokens: tokenUsage(JSON.stringify(input), JSON.stringify(fallback)),
+      fallback: `Qwen ${model} timed out or returned malformed output twice; used deterministic fallback`,
+      latencyMs: 1250
+    };
+  }
+  const output = await qwenChatJson({
+    role,
+    model,
+    system: "You are Trinetra, a production incident-response agent. Return compact JSON only. Preserve numeric confidence fields between 0 and 1.",
+    prompt: buildAgentPrompt(role, input, fallback),
+    fallback
+  });
   return {
     ...output,
     model,
-    tokens: tokenUsage(JSON.stringify(input), JSON.stringify(output)),
-    fallback,
-    latencyMs: forcedFailure ? 1250 : 420 + Object.keys(qwenModels).indexOf(role) * 30
+    tokens: output.usage ? {
+      input: output.usage.prompt_tokens || output.usage.input_tokens || 0,
+      output: output.usage.completion_tokens || output.usage.output_tokens || 0,
+      total: output.usage.total_tokens || 0
+    } : tokenUsage(JSON.stringify(input), JSON.stringify(output)),
+    latencyMs: output.provider === "qwen-live" ? null : 420 + Object.keys(qwenModels).indexOf(role) * 30
   };
+}
+
+function buildAgentPrompt(role, input, fallback) {
+  return JSON.stringify({
+    task: `Act as the ${role} agent in Trinetra.`,
+    incidentData: input,
+    requiredJsonShape: Object.fromEntries(Object.keys(fallback).map((key) => [key, typeof fallback[key]])),
+    localFallbackCandidate: fallback,
+    instruction: "Use the incident data to produce the same JSON shape. Be specific, operational, and do not invent external actions that are not supported by the provided data."
+  });
 }
 
 function tokenUsage(input, output) {
@@ -940,13 +974,17 @@ async function realtimeStatus(requestId) {
     generatedAt: new Date().toISOString(),
     qwen: {
       provider: "Qwen Cloud Model Studio",
-      apiKeyConfigured: qwenApiKeyConfigured,
+      ...qwenConfig,
       models: qwenModels,
       readiness: Object.entries(qwenModels).map(([role, model]) => ({
         role,
         model,
-        status: qwenApiKeyConfigured ? "ready-for-live-call" : "simulation-mode"
+        status: qwenConfig.apiKeyConfigured && qwenConfig.liveEnabled ? "live-api-enabled" : qwenConfig.apiKeyConfigured ? "credentials-detected-shadow-mode" : "local-fallback"
       }))
+    },
+    remediation: {
+      mode: remediationExecutionMode,
+      status: remediationExecutionMode === "execute" ? "mutating actions enabled" : "dry-run recommendations only"
     },
     mcps: mcpRegistry.map((mcp) => ({
       ...mcp,
@@ -960,7 +998,8 @@ async function realtimeStatus(requestId) {
 function buildRealtimeEvents(latest) {
   const baseline = [
     { stage: "watch", status: "active", text: "Polling alert, log, metric, trace, runbook, and approval adapters." },
-    { stage: "models", status: qwenApiKeyConfigured ? "ready" : "simulated", text: qwenApiKeyConfigured ? "Qwen credentials detected; live model calls can be enabled." : "Qwen credentials missing; using deterministic simulation." },
+    { stage: "models", status: qwenConfig.liveEnabled ? "live" : "shadow", text: qwenConfig.liveEnabled ? "Qwen live calls enabled through DashScope compatible mode." : "Set QWEN_LIVE_CALLS=true with Qwen credentials to leave fallback mode." },
+    { stage: "remediation", status: remediationExecutionMode, text: remediationExecutionMode === "execute" ? "Runbook executors may mutate the target system." : "Runbook executors produce plans without mutating the target system." },
     { stage: "mcps", status: "shadow", text: `${mcpRegistry.length} MCP adapters registered. Promote adapters from simulated to live one by one.` }
   ];
 
@@ -989,11 +1028,11 @@ function shutdown(signal) {
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-function runCommander(incident) {
+async function runCommander(incident) {
   const errorRate = incident.metrics.errorRate || 0;
   const severeImpact = /payments|cannot|global/i.test(incident.customerImpact);
   const severity = errorRate > 12 || severeImpact ? "P1" : errorRate > 2 || incident.metrics.diskUsedPct > 90 ? "P2" : "P3";
-  const result = runQwenAgent("commander", incident, () => ({
+  const result = await runQwenAgent("commander", incident, () => ({
     severity,
     routing: severity === "P1" ? "fast-path with human-visible gate" : "P2-P4 standard investigation",
     blastRadius: incident.metrics.affectedRegions.includes("global") ? "global" : incident.metrics.affectedRegions.join(", "),
@@ -1003,7 +1042,7 @@ function runCommander(incident) {
   return result;
 }
 
-function runLogsAgent(incident, trace) {
+async function runLogsAgent(incident, trace) {
   const joined = incident.logs.join("\n");
   let finding = "No dominant log signature found";
   if (/pool exhausted|retry storm/i.test(joined)) finding = "Database pool exhaustion amplified by retry storm";
@@ -1021,7 +1060,7 @@ function runLogsAgent(incident, trace) {
   }));
 }
 
-function runMetricsAgent(incident, trace) {
+async function runMetricsAgent(incident, trace) {
   const m = incident.metrics;
   let finding = "Metrics show elevated saturation without clear causal signal";
   if (m.p95LatencyMs > 1500 && m.saturation > 85) finding = `Saturation ${m.saturation}% aligns with latency ${m.p95LatencyMs}ms`;
@@ -1039,7 +1078,7 @@ function runMetricsAgent(incident, trace) {
   }));
 }
 
-function runTraceAgent(incident, trace) {
+async function runTraceAgent(incident, trace) {
   let finding = "Trace spans show downstream dependency latency but no single failing span";
   if (incident.service === "checkout-api") finding = "Slowest span is checkout-api -> checkout-db acquire_connection";
   if (incident.service === "orders-db") finding = "Trace fanout points to reporting query temp-file pressure";
@@ -1056,7 +1095,7 @@ function runTraceAgent(incident, trace) {
   }));
 }
 
-function runMemoryAgent(incident, trace) {
+async function runMemoryAgent(incident, trace) {
   const storeMatches = readMemorySnapshot().filter((item) => item.service === incident.service);
   const match = storeMatches.at(-1) || historicalCases.find((item) => item.service === incident.service) || historicalCases[0];
   return runQwenAgent("memory", { service: incident.service, match }, () => ({
@@ -1178,6 +1217,15 @@ function verifyOutcome(incident, gate) {
 
   const remediation = executeRemediation(incident, gate);
   if (remediation.service === "demo-storefront") return verifyStorefrontOutcome(incident, gate, remediation);
+  if (remediation.dryRun) {
+    return {
+      status: "Runbook planned; dry-run mode left target unchanged",
+      confidence: 0.91,
+      after: incident.metrics,
+      reason: `${remediation.status}; planned action=${remediation.action}; set REMEDIATION_EXECUTION_MODE=execute to allow mutation`,
+      rollbackTriggered: false
+    };
+  }
 
   const improved = remediation.after || { ...incident.metrics };
   if (improved.errorRate) improved.errorRate = Number(Math.max(0.2, improved.errorRate * 0.22).toFixed(1));
@@ -1215,6 +1263,10 @@ function executeRemediation(incident, gate) {
     };
   }
 
+  if (remediationExecutionMode !== "execute") {
+    return planRemediation(incident, gate);
+  }
+
   switch (gate.deployAction) {
     case "restore_website_config":
       return executeStorefrontRemediation(incident, gate);
@@ -1231,6 +1283,26 @@ function executeRemediation(incident, gate) {
     default:
       return simulatedRemediation(incident, gate, `executed ${gate.deployAction || "approved runbook action"}`);
   }
+}
+
+function planRemediation(incident, gate) {
+  const actionByType = {
+    restore_website_config: "restore failed storefront dependency/config",
+    scale_workload: "scale workload capacity and reduce retry pressure",
+    clear_disk_space: "clear safe database temp files and run manual vacuum",
+    rollback_deploy: "rollback deployment and invalidate config cache",
+    restart_stateless_service: "restart stateless replicas in batches",
+    rotate_certificate: "rotate certificate bundle and reload edge service"
+  };
+  return {
+    executed: false,
+    dryRun: true,
+    service: incident.service,
+    action: actionByType[gate.deployAction] || gate.deployAction || "approved runbook action",
+    status: `Dry-run only: ${gate.runbook?.id || "runbook"} selected but REMEDIATION_EXECUTION_MODE=${remediationExecutionMode}`,
+    failure: incident.demoFailure || null,
+    after: incident.metrics
+  };
 }
 
 function simulatedRemediation(incident, gate, action) {
@@ -1278,6 +1350,15 @@ function executeStorefrontRemediation(incident, gate) {
 
 function verifyStorefrontOutcome(incident, gate, remediation) {
   const status = demoSiteStatus();
+  if (remediation.dryRun) {
+    return {
+      status: "Runbook planned; dry-run mode left /demo-store unchanged",
+      confidence: 0.92,
+      after: { ...incident.metrics, syntheticStatus: status.httpStatus },
+      reason: `${remediation.status}; planned action=${remediation.action}; set REMEDIATION_EXECUTION_MODE=execute to allow mutation`,
+      rollbackTriggered: false
+    };
+  }
   if (!remediation.executed || !status.healthy) {
     return {
       status: "Verification failed; rollback triggered",

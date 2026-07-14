@@ -3,7 +3,14 @@ import { spawn } from "node:child_process";
 
 const port = 4197;
 const child = spawn(process.execPath, ["backend/server.mjs"], {
-  env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", NODE_ENV: "test" },
+  env: {
+    ...process.env,
+    PORT: String(port),
+    HOST: "127.0.0.1",
+    NODE_ENV: "test",
+    QWEN_LIVE_CALLS: "false",
+    REMEDIATION_EXECUTION_MODE: "dry-run"
+  },
   stdio: ["ignore", "pipe", "pipe"]
 });
 
@@ -25,8 +32,7 @@ try {
     method: "POST",
     body: JSON.stringify({ incidentKey: "website", approval: "approved", approverId: "U-HACK-JUDGE" })
   });
-  const fixedStatus = await requestJson("/api/demo-site/status");
-  const fixedSite = await requestText("/demo-store", { expectedStatus: 200 });
+  const dryRunStatus = await requestJson("/api/demo-site/status");
   const runbooks = await requestJson("/api/runbooks");
   const alibaba = await requestJson("/api/cloud/alibaba");
   const realtime = await requestJson("/api/realtime/status");
@@ -44,9 +50,8 @@ try {
   assert(failures.length >= 5, "demo storefront should expose at least five injectable failures");
   assert(brokenSite.includes("Catalog API timeout"), "demo storefront should expose selected injected error");
   assert(websiteAnalysis.triage.runbook.id === "RB-777", "website incident should select the storefront config runbook");
-  assert(websiteAnalysis.verification.status.includes("/demo-store recovered"), "website remediation should verify recovery");
-  assert(fixedStatus.healthy, "demo storefront should be healthy after Trinetra remediation");
-  assert(fixedSite.includes("Healthy homepage restored by Trinetra remediation"), "fixed storefront should render healthy page");
+  assert(websiteAnalysis.verification.status.includes("dry-run mode left /demo-store unchanged"), "website remediation should stay dry-run by default");
+  assert(!dryRunStatus.healthy, "demo storefront should remain broken in dry-run mode");
   assert(runbooks.some((book) => book.version && book.approved), "runbooks should be structured and versioned");
   assert(alibaba.provider === "Alibaba Cloud", "Alibaba deployment proof should be exposed");
   assert(realtime.qwen.readiness.length >= 6, "realtime status should include model readiness");
