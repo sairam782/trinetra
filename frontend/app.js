@@ -68,10 +68,12 @@ function setMode(mode) {
   els.realtimeModeButton.classList.toggle("active", realtime);
   els.demoPanel.classList.toggle("hidden", realtime);
   els.realtimePanel.classList.toggle("hidden", !realtime);
-  els.runButton.textContent = realtime ? "Run realtime probe" : "Run agents";
+  els.runButton.textContent = realtime ? "Run realtime probe" : "Run demo pipeline";
 
   if (realtime) {
+    els.incidentSelect.value = "website";
     refreshRealtimeStatus();
+    refreshDemoSiteStatus();
     realtimeTimer = setInterval(refreshRealtimeStatus, 4000);
   } else if (realtimeTimer) {
     clearInterval(realtimeTimer);
@@ -159,7 +161,7 @@ async function refreshDemoSiteStatus() {
     }
     els.demoSiteTitle.textContent = `Storefront status: ${status.healthy ? "healthy" : "broken"}`;
     els.demoSiteText.textContent = status.healthy
-      ? `Recovered from ${status.failureLabel}. /demo-store returns ${status.httpStatus}. Last fixed: ${status.lastFixedAt || "not yet"}.`
+      ? `Recovered from ${status.failureLabel}. /demo-store returns ${status.httpStatus}. Pipeline action: ${status.lastAction || "not yet"}.`
       : `${status.failureLabel} active. /demo-store returns ${status.httpStatus}: ${status.error}. ${status.symptom}`;
   } catch {
     els.demoSiteTitle.textContent = "Storefront status: unknown";
@@ -369,7 +371,7 @@ function setLoading(isLoading) {
   if (isLoading) {
     els.runButton.textContent = currentMode === "realtime" ? "Probing..." : "Running...";
   } else {
-    els.runButton.textContent = currentMode === "realtime" ? "Run realtime probe" : "Run agents";
+    els.runButton.textContent = currentMode === "realtime" ? "Run realtime probe" : "Run demo pipeline";
   }
 }
 

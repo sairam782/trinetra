@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trinetra</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260713-modes" />
   </head>
   <body>
     <main class="shell">
@@ -27,7 +27,7 @@
           <button id="realtimeModeButton" type="button">Realtime</button>
         </div>
         <div class="field">
-          <label for="incidentSelect">Demo incident</label>
+          <label for="incidentSelect">Pipeline incident</label>
           <select id="incidentSelect">
             <option value="latency">Checkout API latency spike</option>
             <option value="disk">Primary database disk pressure</option>
@@ -42,28 +42,43 @@
             <option value="approved">Human approved</option>
           </select>
         </div>
-        <button id="runButton">Run agents</button>
+        <button id="runButton">Run demo pipeline</button>
       </section>
 
-      <section id="demoPanel" class="demo-bar">
+      <section id="demoPanel" class="demo-overview">
         <div>
-          <p class="eyebrow">Demo target website</p>
-          <h2 id="demoSiteTitle">Storefront status: checking</h2>
-          <p id="demoSiteText" class="muted">Inject the error, open the site, then let Trinetra diagnose and fix it.</p>
+          <p class="eyebrow">Demo mode</p>
+          <h2>Pipeline and project tour</h2>
+          <p class="muted">Use this mode to explain the architecture without mutating the live storefront. It showcases the pipeline, repo layout, and simulated MCP/model layers.</p>
         </div>
-        <div class="demo-actions">
-          <label class="failure-picker" for="failureSelect">
-            <span>Error type</span>
-            <select id="failureSelect"></select>
-          </label>
-          <button id="injectErrorButton">Inject error</button>
-          <a href="/demo-store" target="_blank" rel="noreferrer">Open website</a>
-          <button id="solveWebsiteButton">Use Trinetra to solve</button>
+        <div class="demo-assets">
+          <article><strong>Pipeline</strong><span>Commander -> Specialists -> Adjudication -> Triage -> Gate -> Verification</span></article>
+          <article><strong>Frontend</strong><span>Dashboard, mode switch, realtime console, storefront viewer</span></article>
+          <article><strong>Backend</strong><span>Qwen-tiered orchestrator, runbooks, audit, memory, Alibaba proof</span></article>
+          <article><strong>Scripts</strong><span>Smoke test and model/MCP incubation guide</span></article>
         </div>
       </section>
 
       <section id="realtimePanel" class="realtime-panel hidden">
-        <article>
+        <article class="realtime-site-control">
+          <div class="panel-heading">
+            <p class="eyebrow">Realtime target website</p>
+            <span id="demoSiteTitle">checking</span>
+          </div>
+          <h2>Inject, observe, remediate</h2>
+          <p id="demoSiteText" class="muted">Select a live storefront failure, inject it into `/demo-store`, then route it through Trinetra.</p>
+          <div class="demo-actions">
+            <label class="failure-picker" for="failureSelect">
+              <span>Error type</span>
+              <select id="failureSelect"></select>
+            </label>
+            <button id="injectErrorButton">Inject error</button>
+            <a href="/demo-store" target="_blank" rel="noreferrer">Open website</a>
+            <button id="solveWebsiteButton">Use Trinetra to solve</button>
+          </div>
+        </article>
+
+        <article class="realtime-main">
           <div class="panel-heading">
             <p class="eyebrow">Realtime operations</p>
             <span id="realtimeGeneratedAt">waiting</span>
@@ -228,6 +243,6 @@
       </section>
     </main>
 
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="/app.js?v=20260713-modes"></script>
   </body>
 </html>

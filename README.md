@@ -33,14 +33,15 @@ Open [http://127.0.0.1:4173](http://127.0.0.1:4173).
 
 Trinetra has two dashboard modes:
 
-- **Demo** - scripted storefront failures and deterministic remediation for judging.
-- **Realtime** - live operations console for model/MCP readiness, latest run state, and event stream. Use this once real Qwen calls and MCP adapters are connected.
+- **Demo** - a non-mutating pipeline and project tour. Use it to explain the architecture, repo folders, agent flow, MCP registry, and audit path.
+- **Realtime** - the live target website mode. Use it to inject storefront failures into `/demo-store`, observe the generated incident, route it through Trinetra, execute the selected runbook action, and verify recovery. This is also where real Qwen calls and live MCP adapters can be promoted later.
 
-1. Choose one of five storefront failures in the **Error type** selector.
-2. Click **Inject error**.
-3. Click **Open website** and show `/demo-store` returning the selected failure.
-4. Click **Use Trinetra to solve**.
-5. Trinetra runs the incident pipeline, selects `RB-777`, applies the matching storefront remediation, verifies `/demo-store` returns healthy, and records the full reasoning chain.
+1. Switch to **Realtime**.
+2. Choose one of five storefront failures in the **Error type** selector.
+3. Click **Inject error**.
+4. Click **Open website** and show `/demo-store` returning the selected failure.
+5. Click **Use Trinetra to solve**.
+6. Trinetra runs the incident pipeline, selects `RB-777`, passes the selected failure into the remediation executor, applies the matching storefront action, verifies `/demo-store` returns healthy, and records the full reasoning chain.
 
 Available failure modes:
 

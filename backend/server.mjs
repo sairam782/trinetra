@@ -136,7 +136,8 @@ const demoSiteState = {
   failureId: "missingConfig",
   error: demoFailures.missingConfig.error,
   lastInjectedAt: new Date().toISOString(),
-  lastFixedAt: null
+  lastFixedAt: null,
+  lastAction: "initial injected failure"
 };
 
 const mimeTypes = {
@@ -428,7 +429,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/api/demo-site/fix") {
-      fixDemoSite();
+      const body = await readJson(req);
+      fixDemoSite({ action: body.action || "manual demo reset" });
       sendJson(res, 200, demoSiteStatus(), requestId);
       return;
     }
@@ -1174,30 +1176,10 @@ function verifyOutcome(incident, gate) {
     };
   }
 
-  if (incident.service === "demo-storefront" && ["auto", "approved"].includes(gate.kind)) {
-    const failure = incident.demoFailure || currentDemoFailure();
-    fixDemoSite();
-    const status = demoSiteStatus();
-    if (!status.healthy) {
-      return {
-        status: "Verification failed; rollback triggered",
-        confidence: 0.74,
-        after: { ...incident.metrics, syntheticStatus: status.httpStatus },
-        reason: `Synthetic /demo-store check stayed at ${status.httpStatus} within ${verificationTimeoutMs}ms`,
-        rollbackTriggered: true,
-        rollbackStatus: `${gate.runbook?.id || "runbook"} rollback executed; on-call escalated`
-      };
-    }
-    return {
-      status: "Fix verified; /demo-store recovered",
-      confidence: 0.95,
-      after: { ...incident.metrics, syntheticStatus: 200, errorRate: 0.2, p95LatencyMs: 180 },
-      reason: `Trinetra applied ${failure.runbookTitle}: ${failure.fixSummary}`,
-      rollbackTriggered: false
-    };
-  }
+  const remediation = executeRemediation(incident, gate);
+  if (remediation.service === "demo-storefront") return verifyStorefrontOutcome(incident, gate, remediation);
 
-  const improved = { ...incident.metrics };
+  const improved = remediation.after || { ...incident.metrics };
   if (improved.errorRate) improved.errorRate = Number(Math.max(0.2, improved.errorRate * 0.22).toFixed(1));
   if (improved.p95LatencyMs) improved.p95LatencyMs = Math.round(improved.p95LatencyMs * 0.48);
   if (improved.diskUsedPct) improved.diskUsedPct = Math.round(improved.diskUsedPct * 0.82);
@@ -1217,7 +1199,100 @@ function verifyOutcome(incident, gate) {
     status: "Fix verified; leading indicators recovered",
     confidence: 0.93,
     after: improved,
-    reason: `Triggering health signal recovered within ${verificationTimeoutMs}ms`,
+    reason: `${remediation.action} completed; triggering health signal recovered within ${verificationTimeoutMs}ms`,
+    rollbackTriggered: false
+  };
+}
+
+function executeRemediation(incident, gate) {
+  if (!["auto", "approved"].includes(gate.kind)) {
+    return {
+      executed: false,
+      service: incident.service,
+      action: "none",
+      status: `Gate ${gate.kind} did not authorize remediation`,
+      after: incident.metrics
+    };
+  }
+
+  switch (gate.deployAction) {
+    case "restore_website_config":
+      return executeStorefrontRemediation(incident, gate);
+    case "scale_workload":
+      return simulatedRemediation(incident, gate, "scaled workload capacity and reduced retry pressure");
+    case "clear_disk_space":
+      return simulatedRemediation(incident, gate, "cleared safe database temp files and ran manual vacuum");
+    case "rollback_deploy":
+      return simulatedRemediation(incident, gate, "rolled back deployment and invalidated config cache");
+    case "restart_stateless_service":
+      return simulatedRemediation(incident, gate, "restarted stateless replicas in batches");
+    case "rotate_certificate":
+      return simulatedRemediation(incident, gate, "rotated certificate bundle and reloaded edge service");
+    default:
+      return simulatedRemediation(incident, gate, `executed ${gate.deployAction || "approved runbook action"}`);
+  }
+}
+
+function simulatedRemediation(incident, gate, action) {
+  return {
+    executed: true,
+    service: incident.service,
+    action,
+    status: `${gate.runbook?.id || "runbook"} action executed through simulated MCP adapter`,
+    after: { ...incident.metrics }
+  };
+}
+
+function executeStorefrontRemediation(incident, gate) {
+  const failure = incident.demoFailure || currentDemoFailure();
+  const actionByFailure = {
+    missingConfig: "restored FEATURED_PRODUCTS config",
+    apiTimeout: "enabled cached catalog fallback and lowered product feed timeout",
+    paymentScript: "pinned payment widget to stable bundle",
+    inventoryDrift: "applied inventory compatibility mapper",
+    cssAsset: "republished critical CSS and purged CDN asset manifest"
+  };
+  const action = actionByFailure[failure.id] || failure.fixSummary;
+
+  if (gate.runbook?.id !== "RB-777") {
+    return {
+      executed: false,
+      service: "demo-storefront",
+      action,
+      status: `Refused storefront remediation because ${gate.runbook?.id || "no runbook"} is not RB-777`,
+      failure,
+      after: incident.metrics
+    };
+  }
+
+  fixDemoSite({ action, runbookId: gate.runbook.id, failureId: failure.id });
+  return {
+    executed: true,
+    service: "demo-storefront",
+    action,
+    status: `${failure.label} remediated through ${gate.runbook.id}`,
+    failure,
+    after: { ...incident.metrics, syntheticStatus: 200, errorRate: 0.2, p95LatencyMs: 180, visualDiffScore: 0.02 }
+  };
+}
+
+function verifyStorefrontOutcome(incident, gate, remediation) {
+  const status = demoSiteStatus();
+  if (!remediation.executed || !status.healthy) {
+    return {
+      status: "Verification failed; rollback triggered",
+      confidence: 0.74,
+      after: { ...incident.metrics, syntheticStatus: status.httpStatus },
+      reason: `${remediation.status}; synthetic /demo-store check stayed at ${status.httpStatus} within ${verificationTimeoutMs}ms`,
+      rollbackTriggered: true,
+      rollbackStatus: `${gate.runbook?.id || "runbook"} rollback executed; on-call escalated`
+    };
+  }
+  return {
+    status: "Fix verified; /demo-store recovered",
+    confidence: 0.95,
+    after: remediation.after,
+    reason: `${remediation.status}; action=${remediation.action}; /demo-store returned ${status.httpStatus}`,
     rollbackTriggered: false
   };
 }
@@ -1251,7 +1326,8 @@ function demoSiteStatus() {
     error: demoSiteState.broken ? demoSiteState.error : null,
     symptom: demoSiteState.broken ? failure.symptom : "Storefront is healthy",
     lastInjectedAt: demoSiteState.lastInjectedAt,
-    lastFixedAt: demoSiteState.lastFixedAt
+    lastFixedAt: demoSiteState.lastFixedAt,
+    lastAction: demoSiteState.lastAction
   };
 }
 
@@ -1262,12 +1338,14 @@ function injectDemoSiteError(failureId = "missingConfig") {
   demoSiteState.error = failure.error;
   demoSiteState.lastInjectedAt = new Date().toISOString();
   demoSiteState.lastFixedAt = null;
+  demoSiteState.lastAction = `injected ${failure.label}`;
 }
 
-function fixDemoSite() {
+function fixDemoSite({ action = "restored storefront", runbookId = "manual", failureId = demoSiteState.failureId } = {}) {
   demoSiteState.broken = false;
   demoSiteState.error = null;
   demoSiteState.lastFixedAt = new Date().toISOString();
+  demoSiteState.lastAction = `${runbookId}: ${action} for ${failureId}`;
 }
 
 function renderDemoStore() {
