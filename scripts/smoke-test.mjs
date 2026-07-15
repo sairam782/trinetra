@@ -9,7 +9,8 @@ const child = spawn(process.execPath, ["backend/server.mjs"], {
     HOST: "127.0.0.1",
     NODE_ENV: "test",
     QWEN_LIVE_CALLS: "false",
-    REMEDIATION_EXECUTION_MODE: "dry-run"
+    REMEDIATION_EXECUTION_MODE: "dry-run",
+    RUNBOOK_ALLOWLIST: "RB-101,RB-204,RB-330,RB-401,RB-510,RB-777"
   },
   stdio: ["ignore", "pipe", "pipe"]
 });

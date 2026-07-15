@@ -4,8 +4,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadEnvFile } from "./config/env-loader.mjs";
 import { getAlibabaDeploymentProof } from "./cloud/alibaba-client.mjs";
 import { qwenChatJson, qwenRuntimeConfig } from "./cloud/qwen-client.mjs";
+
+loadEnvFile();
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = join(__dirname, "..");

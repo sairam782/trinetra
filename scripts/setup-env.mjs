@@ -22,11 +22,15 @@ const secretKeys = new Set([
 ]);
 
 const recommended = {
+  NODE_ENV: "development",
+  HOST: "127.0.0.1",
+  PORT: "4173",
+  MAX_BODY_BYTES: "64000",
   QWEN_API_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
   QWEN_LIVE_CALLS: "false",
   REMEDIATION_EXECUTION_MODE: "dry-run",
   AUTO_EXECUTE_CONFIDENCE_THRESHOLD: "0.90",
-  RUNBOOK_ALLOWLIST: "RB-101,RB-204,RB-330,RB-401,RB-510",
+  RUNBOOK_ALLOWLIST: "RB-101,RB-204,RB-330,RB-401,RB-510,RB-777",
   SLACK_APPROVER_IDS: "U-HACK-JUDGE,U-ONCALL-PRIMARY",
   MCP_ALERTS_LIVE: "false",
   MCP_LOGS_LIVE: "false",

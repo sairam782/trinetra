@@ -131,6 +131,8 @@ npm run env:setup:interactive
 npm run env:check
 ```
 
+`npm start` automatically loads local `.env`, so you do not need to export variables manually.
+
 Full guide: [docs/API_KEYS_AND_MCPS.md](docs/API_KEYS_AND_MCPS.md)
 
 Important variables:
