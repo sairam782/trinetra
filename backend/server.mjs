@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { loadEnvFile } from "./config/env-loader.mjs";
 import { getAlibabaDeploymentProof } from "./cloud/alibaba-client.mjs";
 import { qwenChatJson, qwenRuntimeConfig } from "./cloud/qwen-client.mjs";
+import { checkLiveMcpHealth } from "./mcps/live-connectors.mjs";
 
 loadEnvFile();
 
@@ -448,7 +449,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/api/mcps") {
-      sendJson(res, 200, mcpRegistry, requestId);
+      sendJson(res, 200, await buildMcpStatus(), requestId);
       return;
     }
 
@@ -975,6 +976,7 @@ async function readRecentRuns(limit = 25) {
 async function realtimeStatus(requestId) {
   const runs = await readRecentRuns(5);
   const latest = runs[0] || null;
+  const mcps = await buildMcpStatus();
   return {
     requestId,
     mode: deploymentMode,
@@ -993,13 +995,24 @@ async function realtimeStatus(requestId) {
       mode: remediationExecutionMode,
       status: remediationExecutionMode === "execute" ? "mutating actions enabled" : "dry-run recommendations only"
     },
-    mcps: mcpRegistry.map((mcp) => ({
-      ...mcp,
-      status: process.env[`MCP_${mcp.id.toUpperCase()}_LIVE`] === "true" ? "live" : mcp.status
-    })),
+    mcps,
     latestRun: latest,
     liveEvents: buildRealtimeEvents(latest)
   };
+}
+
+async function buildMcpStatus() {
+  const health = await checkLiveMcpHealth();
+  return mcpRegistry.map((mcp) => {
+    const liveRequested = process.env[`MCP_${mcp.id.toUpperCase()}_LIVE`] === "true";
+    const connectorHealth = health[mcp.id];
+    return {
+      ...mcp,
+      liveRequested,
+      status: connectorHealth?.status || (liveRequested ? "live" : mcp.status),
+      health: connectorHealth?.message || (liveRequested ? "health check not implemented" : "simulation mode")
+    };
+  });
 }
 
 function buildRealtimeEvents(latest) {

@@ -31,6 +31,7 @@ Validate configuration:
 
 ```bash
 npm run env:check
+npm run mcps:check
 ```
 
 Run locally:
@@ -91,7 +92,7 @@ Trinetra currently exposes simulated MCP adapters in the UI. These env vars are 
 | --- | --- | --- | --- |
 | Alertmanager | `MCP_ALERTS_LIVE=true` | `ALERTMANAGER_BASE_URL` | read-only |
 | Datadog Logs | `MCP_LOGS_LIVE=true` | `DATADOG_API_KEY`, `DATADOG_APP_KEY` | read-only |
-| Prometheus | `MCP_METRICS_LIVE=true` | `PROMETHEUS_BASE_URL` | read-only |
+| Prometheus | `MCP_METRICS_LIVE=true` | `PROMETHEUS_BASE_URL`, `PROMETHEUS_USER`, `PROMETHEUS_PASSWORD` | read-only |
 | OpenTelemetry | `MCP_TRACES_LIVE=true` | `OTEL_COLLECTOR_URL` | read-only |
 | Runbook RAG | `MCP_MEMORY_LIVE=true` | `ALIBABA_RDS_POSTGRES_URL` or vector store URL | read/write after approval |
 | GitHub | `MCP_GITHUB_LIVE=true` | `GITHUB_TOKEN` | read-only first |
@@ -196,6 +197,8 @@ ALERTMANAGER_BASE_URL=
 DATADOG_API_KEY=
 DATADOG_APP_KEY=
 PROMETHEUS_BASE_URL=
+PROMETHEUS_USER=
+PROMETHEUS_PASSWORD=
 OTEL_COLLECTOR_URL=
 GITHUB_TOKEN=
 SLACK_BOT_TOKEN=
@@ -219,10 +222,17 @@ ALIBABA_RDS_POSTGRES_URL=
 
 ```bash
 npm run env:check
+npm run mcps:check
 npm run check
 npm run smoke
 npm run incubate
 ```
+
+## Current Live Connector Notes
+
+- Slack uses `auth.test` and reports connected when the bot token is valid.
+- Prometheus uses Grafana Cloud basic auth: `PROMETHEUS_USER` is the instance/user id and `PROMETHEUS_PASSWORD` is the access token.
+- Jira Cloud requires all three values: `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`. The token alone is not enough for Atlassian Basic auth.
 
 Then open:
 

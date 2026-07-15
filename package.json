@@ -7,11 +7,12 @@
     "start": "node backend/server.mjs",
     "dev": "node backend/server.mjs",
     "start:prod": "NODE_ENV=production HOST=0.0.0.0 node backend/server.mjs",
-    "check": "node --check backend/config/env-loader.mjs && node --check backend/server.mjs && node --check frontend/app.js && node --check scripts/smoke-test.mjs && node --check scripts/incubate-models.mjs && node --check scripts/setup-env.mjs && node --check scripts/validate-env.mjs",
+    "check": "node --check backend/config/env-loader.mjs && node --check backend/mcps/live-connectors.mjs && node --check backend/server.mjs && node --check frontend/app.js && node --check scripts/smoke-test.mjs && node --check scripts/incubate-models.mjs && node --check scripts/setup-env.mjs && node --check scripts/validate-env.mjs && node --check scripts/check-mcps.mjs",
     "smoke": "node scripts/smoke-test.mjs",
     "incubate": "node scripts/incubate-models.mjs",
     "env:setup": "node scripts/setup-env.mjs",
     "env:setup:interactive": "node scripts/setup-env.mjs --interactive",
-    "env:check": "node scripts/validate-env.mjs"
+    "env:check": "node scripts/validate-env.mjs",
+    "mcps:check": "node scripts/check-mcps.mjs"
   }
 }

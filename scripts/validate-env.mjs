@@ -14,6 +14,8 @@ const checks = [
   ["GitHub MCP", env.MCP_GITHUB_LIVE !== "true" || Boolean(env.GITHUB_TOKEN), "Set GITHUB_TOKEN or keep MCP_GITHUB_LIVE=false"],
   ["Slack MCP", env.MCP_CHAT_LIVE !== "true" || Boolean(env.SLACK_BOT_TOKEN), "Set SLACK_BOT_TOKEN or keep MCP_CHAT_LIVE=false"],
   ["Logs MCP", env.MCP_LOGS_LIVE !== "true" || Boolean(env.DATADOG_API_KEY), "Set DATADOG_API_KEY or keep MCP_LOGS_LIVE=false"],
+  ["Prometheus MCP", env.MCP_METRICS_LIVE !== "true" || Boolean(env.PROMETHEUS_BASE_URL && env.PROMETHEUS_USER && env.PROMETHEUS_PASSWORD), "Set PROMETHEUS_BASE_URL/PROMETHEUS_USER/PROMETHEUS_PASSWORD or keep MCP_METRICS_LIVE=false"],
+  ["Jira MCP", env.MCP_TICKETS_LIVE !== "true" || Boolean(env.JIRA_BASE_URL && env.JIRA_EMAIL && env.JIRA_API_TOKEN), "Set JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN or keep MCP_TICKETS_LIVE=false"],
   ["Pager MCP", env.MCP_PAGER_LIVE !== "true" || Boolean(env.PAGERDUTY_API_TOKEN), "Set PAGERDUTY_API_TOKEN or keep MCP_PAGER_LIVE=false"],
   ["Deploy MCP", env.MCP_DEPLOY_LIVE !== "true" || Boolean(env.KUBECONFIG_PATH || env.ALIBABA_CLOUD_ACCESS_KEY_ID), "Set KUBECONFIG_PATH/Alibaba keys or keep MCP_DEPLOY_LIVE=false"]
 ];

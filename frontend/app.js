@@ -254,6 +254,7 @@ function renderRealtimeStatus(status) {
       <strong>${escapeHtml(mcp.name)}</strong>
       <span>${escapeHtml(mcp.category)}</span>
       <em>${escapeHtml(mcp.status)}</em>
+      ${mcp.health ? `<small>${escapeHtml(mcp.health)}</small>` : ""}
     `;
     return card;
   }));
@@ -313,6 +314,7 @@ function renderMcps(mcps = []) {
       </div>
       <p>${escapeHtml(mcp.category)}</p>
       <small>${escapeHtml(mcp.actions.join(" · "))}</small>
+      ${mcp.health ? `<small>${escapeHtml(mcp.health)}</small>` : ""}
     `;
     return card;
   }));
