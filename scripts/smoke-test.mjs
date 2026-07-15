@@ -43,8 +43,8 @@ try {
   assert(readiness.ready, "readiness endpoint should be ready");
   assert(analysis.audit.length >= 10, "analysis should include audited agent calls");
   assert(analysis.mcps.length >= 10, "analysis should include MCP registry");
-  assert(analysis.qwen.models.commander === "qwen3.6-plus", "commander should use qwen3.6-plus");
-  assert(analysis.qwen.models.triage === "qwen3.6-max-preview", "triage should use qwen3.6-max-preview");
+  assert(analysis.qwen.models.commander, "commander should expose configured Qwen model");
+  assert(analysis.qwen.models.triage, "triage should expose configured Qwen model");
   assert(analysis.route.name === "P1 fast-path", "deploy scenario should route to P1 fast-path");
   assert(analysis.adjudication.reasoning, "analysis should include adjudication reasoning");
   assert(analysis.gate.reason, "analysis should include remediation gate reason");

@@ -28,14 +28,14 @@ const qwenApiKeyConfigured = Boolean(process.env.QWEN_API_KEY || process.env.DAS
 const qwenConfig = qwenRuntimeConfig();
 const remediationExecutionMode = process.env.REMEDIATION_EXECUTION_MODE || "dry-run";
 const qwenModels = {
-  commander: "qwen3.6-plus",
-  logs: "qwen3.6-flash",
-  metrics: "qwen3.6-flash",
-  traces: "qwen3.6-flash",
-  memory: "qwen3.6-flash",
-  communication: "qwen3.6-flash",
-  triage: "qwen3.6-max-preview",
-  documentation: "qwen3.6-plus"
+  commander: process.env.QWEN_MODEL_COMMANDER || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
+  logs: process.env.QWEN_MODEL_LOGS || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
+  metrics: process.env.QWEN_MODEL_METRICS || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
+  traces: process.env.QWEN_MODEL_TRACES || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
+  memory: process.env.QWEN_MODEL_MEMORY || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
+  communication: process.env.QWEN_MODEL_COMMUNICATION || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
+  triage: process.env.QWEN_MODEL_TRIAGE || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
+  documentation: process.env.QWEN_MODEL_DOCUMENTATION || process.env.QWEN_MODEL_DEFAULT || "qwen-plus"
 };
 const dedupeWindowMs = Number(process.env.DEDUPE_WINDOW_MS || 180_000);
 const verificationTimeoutMs = Number(process.env.VERIFICATION_TIMEOUT_MS || 30_000);
@@ -853,15 +853,19 @@ async function runQwenAgent(role, input, buildOutput) {
     prompt: buildAgentPrompt(role, input, fallback),
     fallback
   });
-  return {
+  const stableOutput = {
     ...output,
+    agent: fallback.agent || output.agent
+  };
+  return {
+    ...stableOutput,
     model,
-    tokens: output.usage ? {
-      input: output.usage.prompt_tokens || output.usage.input_tokens || 0,
-      output: output.usage.completion_tokens || output.usage.output_tokens || 0,
-      total: output.usage.total_tokens || 0
-    } : tokenUsage(JSON.stringify(input), JSON.stringify(output)),
-    latencyMs: output.provider === "qwen-live" ? null : 420 + Object.keys(qwenModels).indexOf(role) * 30
+    tokens: stableOutput.usage ? {
+      input: stableOutput.usage.prompt_tokens || stableOutput.usage.input_tokens || 0,
+      output: stableOutput.usage.completion_tokens || stableOutput.usage.output_tokens || 0,
+      total: stableOutput.usage.total_tokens || 0
+    } : tokenUsage(JSON.stringify(input), JSON.stringify(stableOutput)),
+    latencyMs: stableOutput.provider === "qwen-live" ? null : 420 + Object.keys(qwenModels).indexOf(role) * 30
   };
 }
 

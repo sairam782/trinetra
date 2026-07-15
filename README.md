@@ -93,10 +93,9 @@ The smoke test covers:
 
 ## Agent Model Tiers
 
-- Commander: `qwen3.6-plus`
-- Logs/Metrics/Trace/Communication: `qwen3.6-flash`
-- Triage/adjudication: `qwen3.6-max-preview`
-- Documentation: `qwen3.6-plus`
+- Default local/international model: `qwen-plus`
+- Override all agents with `QWEN_MODEL_DEFAULT`
+- Override one agent with `QWEN_MODEL_COMMANDER`, `QWEN_MODEL_LOGS`, `QWEN_MODEL_METRICS`, `QWEN_MODEL_TRACES`, `QWEN_MODEL_MEMORY`, `QWEN_MODEL_TRIAGE`, `QWEN_MODEL_COMMUNICATION`, or `QWEN_MODEL_DOCUMENTATION`
 
 Local runs are deterministic without credentials, but each agent call still records model, token estimate, confidence, latency, fallback state, MCP action, and reasoning.
 
@@ -104,6 +103,8 @@ To enable real Qwen calls through Alibaba Cloud Model Studio / DashScope compati
 
 ```bash
 QWEN_API_KEY=your_key_here \
+QWEN_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1 \
+QWEN_MODEL_DEFAULT=qwen-plus \
 QWEN_LIVE_CALLS=true \
 npm start
 ```
@@ -139,6 +140,7 @@ Important variables:
 
 - `QWEN_API_KEY` or `DASHSCOPE_API_KEY`
 - `QWEN_API_BASE_URL`
+- `QWEN_MODEL_DEFAULT`
 - `QWEN_LIVE_CALLS`
 - `REMEDIATION_EXECUTION_MODE`
 - `ALIBABA_CLOUD_REGION`

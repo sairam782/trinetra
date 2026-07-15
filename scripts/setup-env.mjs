@@ -26,7 +26,9 @@ const recommended = {
   HOST: "127.0.0.1",
   PORT: "4173",
   MAX_BODY_BYTES: "64000",
-  QWEN_API_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  QWEN_API_BASE_URL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+  QWEN_MODEL_DEFAULT: "qwen-plus",
+  QWEN_AGENT_TIMEOUT_MS: "30000",
   QWEN_LIVE_CALLS: "false",
   REMEDIATION_EXECUTION_MODE: "dry-run",
   AUTO_EXECUTE_CONFIDENCE_THRESHOLD: "0.90",
@@ -103,7 +105,7 @@ function parseEnv(raw) {
 function renderEnv(values) {
   const sections = [
     ["Runtime", ["NODE_ENV", "HOST", "PORT", "MAX_BODY_BYTES"]],
-    ["Qwen Cloud / Alibaba Cloud Model Studio", ["QWEN_API_KEY", "DASHSCOPE_API_KEY", "QWEN_API_BASE_URL", "QWEN_AGENT_TIMEOUT_MS", "QWEN_AGENT_RETRY_COUNT", "QWEN_LIVE_CALLS"]],
+    ["Qwen Cloud / Alibaba Cloud Model Studio", ["QWEN_API_KEY", "DASHSCOPE_API_KEY", "QWEN_API_BASE_URL", "QWEN_MODEL_DEFAULT", "QWEN_AGENT_TIMEOUT_MS", "QWEN_AGENT_RETRY_COUNT", "QWEN_LIVE_CALLS"]],
     ["Alibaba Cloud deployment proof and managed data targets", ["ALIBABA_CLOUD_REGION", "ALIBABA_CLOUD_ACCESS_KEY_ID", "ALIBABA_CLOUD_ACCESS_KEY_SECRET", "ALIBABA_COMPUTE_TARGET", "ALIBABA_DATABASE_TARGET", "ALIBABA_RDS_POSTGRES_URL"]],
     ["Safety controls", ["AUTO_EXECUTE_CONFIDENCE_THRESHOLD", "RUNBOOK_ALLOWLIST", "SLACK_APPROVER_IDS", "DEDUPE_WINDOW_MS", "VERIFICATION_TIMEOUT_MS", "REMEDIATION_EXECUTION_MODE"]],
     ["MCP live toggles", ["MCP_ALERTS_LIVE", "MCP_LOGS_LIVE", "MCP_METRICS_LIVE", "MCP_TRACES_LIVE", "MCP_MEMORY_LIVE", "MCP_GITHUB_LIVE", "MCP_CHAT_LIVE", "MCP_TICKETS_LIVE", "MCP_DEPLOY_LIVE", "MCP_DOCS_LIVE", "MCP_PAGER_LIVE"]],
