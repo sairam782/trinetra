@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { loadEnvFile } from "./config/env-loader.mjs";
 import { getAlibabaDeploymentProof } from "./cloud/alibaba-client.mjs";
 import { qwenChatJson, qwenRuntimeConfig } from "./cloud/qwen-client.mjs";
+import { createLogger, readRecentLogEntries } from "./logger.mjs";
 import { checkLiveMcpHealth } from "./mcps/live-connectors.mjs";
 
 loadEnvFile();
@@ -16,6 +17,7 @@ const repoRoot = join(__dirname, "..");
 const publicDir = join(repoRoot, "frontend");
 const dataDir = join(repoRoot, "data");
 const auditLogPath = join(dataDir, "incident-runs.jsonl");
+const backendLogPath = join(dataDir, "backend-events.jsonl");
 const memoryStorePath = join(dataDir, "historical-memory.json");
 const port = Number(process.env.PORT || 4173);
 const host = process.env.HOST || "127.0.0.1";
@@ -41,6 +43,10 @@ const qwenModels = {
 const dedupeWindowMs = Number(process.env.DEDUPE_WINDOW_MS || 180_000);
 const verificationTimeoutMs = Number(process.env.VERIFICATION_TIMEOUT_MS || 30_000);
 const dedupeCache = new Map();
+const logger = createLogger({
+  path: backendLogPath,
+  consoleEnabled: process.env.LOG_TO_CONSOLE !== "false"
+});
 const demoFailures = {
   missingConfig: {
     id: "missingConfig",
@@ -381,6 +387,16 @@ const mcpRegistry = [
 
 const server = http.createServer(async (req, res) => {
   const requestId = crypto.randomUUID();
+  const requestStartedAt = Date.now();
+  res.on("finish", () => {
+    void logger.info("http_request", {
+      requestId,
+      method: req.method,
+      path: req.url?.split("?")[0] || "/",
+      statusCode: res.statusCode,
+      durationMs: Date.now() - requestStartedAt
+    }).catch(() => {});
+  });
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host}`);
 
@@ -432,6 +448,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/api/demo-site/inject-error") {
       const body = await readJson(req);
       injectDemoSiteError(body.failureId);
+      void logger.info("demo_error_injected", {
+        requestId,
+        failureId: demoSiteStatus().failureId,
+        httpStatus: demoSiteStatus().httpStatus
+      }).catch(() => {});
       sendJson(res, 200, demoSiteStatus(), requestId);
       return;
     }
@@ -439,6 +460,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/api/demo-site/fix") {
       const body = await readJson(req);
       fixDemoSite({ action: body.action || "manual demo reset" });
+      void logger.info("demo_site_fixed", {
+        requestId,
+        action: body.action || "manual demo reset",
+        status: demoSiteStatus()
+      }).catch(() => {});
       sendJson(res, 200, demoSiteStatus(), requestId);
       return;
     }
@@ -468,10 +494,33 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/logs") {
+      const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") || 100)));
+      sendJson(res, 200, await readRecentLogEntries(backendLogPath, limit), requestId);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/incidents/analyze") {
       const body = await readJson(req);
+      void logger.info("incident_analyze_started", {
+        requestId,
+        incidentKey: body.incidentKey,
+        approval: body.approval
+      }).catch(() => {});
       const result = await orchestrateIncident(validateAnalyzeRequest(body), requestId);
       await persistRun(result);
+      void logger.info("incident_analyze_completed", {
+        requestId,
+        runId: result.runId,
+        incidentId: result.incident.id,
+        service: result.incident.service,
+        severity: result.commander.severity,
+        gate: result.gate.kind,
+        verification: result.verification.status,
+        qwenLive: result.qwen.runtime.liveEnabled,
+        calls: result.totals.calls,
+        cost: result.totals.cost
+      }).catch(() => {});
       sendJson(res, 200, result, requestId);
       return;
     }
@@ -506,6 +555,11 @@ const server = http.createServer(async (req, res) => {
     res.end(req.method === "HEAD" ? undefined : file);
   } catch (error) {
     if (error instanceof HttpError) {
+      void logger.warn("http_error", {
+        requestId,
+        status: error.status,
+        message: error.message
+      }).catch(() => {});
       sendJson(res, error.status, { error: error.message, requestId }, requestId);
       return;
     }
@@ -514,12 +568,23 @@ const server = http.createServer(async (req, res) => {
       res.end("Not found");
       return;
     }
-    console.error({ requestId, error });
+    void logger.error("unhandled_error", {
+      requestId,
+      message: error?.message || "Unexpected server error",
+      stack: error?.stack
+    }).catch(() => {});
     sendJson(res, 500, { error: "Unexpected server error", requestId }, requestId);
   }
 });
 
 server.listen(port, host, () => {
+  void logger.info("server_started", {
+    host,
+    port,
+    mode: deploymentMode,
+    qwenLive: qwenConfig.liveEnabled,
+    remediationExecutionMode
+  }).catch(() => {});
   console.log(`Trinetra running at http://${host}:${port}`);
 });
 
@@ -1003,7 +1068,7 @@ async function realtimeStatus(requestId) {
 
 async function buildMcpStatus() {
   const health = await checkLiveMcpHealth();
-  return mcpRegistry.map((mcp) => {
+  const statuses = mcpRegistry.map((mcp) => {
     const liveRequested = process.env[`MCP_${mcp.id.toUpperCase()}_LIVE`] === "true";
     const connectorHealth = health[mcp.id];
     return {
@@ -1013,6 +1078,11 @@ async function buildMcpStatus() {
       health: connectorHealth?.message || (liveRequested ? "health check not implemented" : "simulation mode")
     };
   });
+  void logger.info("mcp_health_checked", {
+    live: statuses.filter((mcp) => mcp.liveRequested).map(({ id, status }) => ({ id, status })),
+    unhealthy: statuses.filter((mcp) => ["unhealthy", "missing-config"].includes(mcp.status)).map(({ id, status, health }) => ({ id, status, health }))
+  }).catch(() => {});
+  return statuses;
 }
 
 function buildRealtimeEvents(latest) {
@@ -1035,10 +1105,11 @@ function buildRealtimeEvents(latest) {
 }
 
 function shutdown(signal) {
+  void logger.info("server_shutdown_requested", { signal }).catch(() => {});
   console.log(`${signal} received; closing Trinetra server`);
   server.close((error) => {
     if (error) {
-      console.error(error);
+      void logger.error("server_shutdown_error", { message: error.message, stack: error.stack }).catch(() => {});
       process.exit(1);
     }
     process.exit(0);

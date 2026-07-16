@@ -8,6 +8,7 @@ Trinetra is a Qwen-native autonomous incident response system for the Qwen Cloud
 trinetra/
   backend/
     server.mjs                 # Node API, async orchestrator, gated remediation executor
+    logger.mjs                 # Redacting JSONL backend logger
     cloud/qwen-client.mjs      # DashScope/OpenAI-compatible Qwen client
     cloud/alibaba-client.mjs   # Alibaba Cloud deployment proof seam
   frontend/
@@ -33,6 +34,14 @@ npm start
 ```
 
 Open [http://127.0.0.1:4173](http://127.0.0.1:4173).
+
+Run a second local copy with backend logging on another port:
+
+```bash
+npm run start:logger
+```
+
+Open [http://127.0.0.1:4174](http://127.0.0.1:4174). Recent backend events are available at `/api/logs`, and the JSONL log file is written to `data/backend-events.jsonl`.
 
 ## Demo Story
 
@@ -86,6 +95,7 @@ The smoke test covers:
 - `POST /api/demo-site/inject-error` - inject storefront failure
 - `POST /api/incidents/analyze` - run the Trinetra agent pipeline
 - `GET /api/runs` - recent persisted production runs
+- `GET /api/logs` - recent redacted backend log events
 - `GET /api/mcps` - MCP connector registry
 - `GET /api/runbooks` - structured approved runbook library
 - `GET /api/cloud/alibaba` - Alibaba Cloud deployment proof/config metadata
