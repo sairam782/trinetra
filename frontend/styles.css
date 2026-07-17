@@ -554,6 +554,78 @@ dd {
   margin-top: 14px;
 }
 
+.trace-section {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(460px, 1.1fr);
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.trace-panel {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgb(18 22 25 / 92%);
+}
+
+.trace-list {
+  display: grid;
+  gap: 8px;
+  max-height: 680px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.trace-item,
+.trace-empty {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.trace-item summary {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr) minmax(160px, auto);
+  gap: 10px;
+  align-items: center;
+  padding: 11px;
+  cursor: pointer;
+}
+
+.trace-item summary span,
+.trace-item summary em {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-style: normal;
+}
+
+.trace-item pre,
+.mcp-trace-row pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 11px;
+  border-top: 1px solid var(--line-soft);
+  color: #dbe7eb;
+  background: #080b0d;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.trace-block h3 {
+  margin: 12px 11px 6px;
+  color: var(--soft);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+}
+
+.trace-empty {
+  padding: 12px;
+  color: var(--muted);
+}
+
 .agent-cards {
   display: grid;
   gap: 9px;
@@ -756,6 +828,7 @@ dd {
   .hero,
   .grid,
   .lower-grid,
+  .trace-section,
   .mcp-section {
     grid-template-columns: 1fr;
   }

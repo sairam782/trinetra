@@ -43,6 +43,8 @@ const els = {
   auditRows: document.querySelector("#auditRows"),
   mcpGrid: document.querySelector("#mcpGrid"),
   mcpTrace: document.querySelector("#mcpTrace"),
+  executionTimeline: document.querySelector("#executionTimeline"),
+  qwenTrace: document.querySelector("#qwenTrace"),
   recentRuns: document.querySelector("#recentRuns")
 };
 
@@ -103,14 +105,14 @@ async function runAgents() {
 }
 
 function render(data) {
-  const { incident, commander, specialists, adjudication, triage, remediationPlan, gate, verification, audit, totals, mcps, mcpTrace, runId, requestId, mode, route, qwen } = data;
+  const { incident, commander, specialists, adjudication, triage, remediationPlan, gate, verification, audit, totals, mcps, mcpTrace, executionTimeline, qwenTrace, runId, requestId, mode, route, qwen } = data;
   els.modeText.textContent = mode;
   els.runIdText.textContent = runId;
   els.requestIdText.textContent = requestId;
   els.routeText.textContent = route?.name || "--";
   els.callCount.textContent = totals.calls;
-  els.avgConfidence.textContent = `${Math.round(totals.confidence * 100)}%`;
-  els.runCost.textContent = `$${totals.cost.toFixed(3)}`;
+  els.avgConfidence.textContent = formatPercent(totals.confidence);
+  els.runCost.textContent = formatCost(totals.cost);
 
   els.severityBadge.textContent = commander.severity;
   els.severityBadge.className = commander.severity === "P1" ? "hot" : "warm";
@@ -122,7 +124,7 @@ function render(data) {
   els.routingText.textContent = commander.routing;
 
   els.rootCause.textContent = adjudication.rootCause;
-  els.confidenceText.textContent = `${Math.round(adjudication.confidence * 100)}% confidence after ${adjudication.negotiation.length} specialist votes. Winner: ${adjudication.winner}. Runbook selected: ${triage.runbook.id}. Triage model: ${qwen.models.triage}.`;
+  els.confidenceText.textContent = `Confidence: ${formatPercent(adjudication.confidence)}. Winner: ${valueOrNA(adjudication.winner)}. Runbook: ${valueOrNA(triage.runbook?.id)}. Triage model: ${valueOrNA(qwen.models?.triage)}.`;
   els.gateLabel.textContent = gate.label;
   els.gateAction.textContent = `${gate.action}. Reason: ${gate.reason}. Risk: ${triage.runbook.risk}. Steps: ${triage.runbook.steps.join(" -> ")}.`;
   els.verificationStatus.textContent = verification.status;
@@ -130,6 +132,8 @@ function render(data) {
   renderRemediationTimeline(remediationPlan);
   renderAgents(specialists);
   renderAudit(audit);
+  renderExecutionTimeline(executionTimeline || []);
+  renderQwenTrace(qwenTrace || []);
   renderMcps(mcps);
   renderMcpTrace(mcpTrace);
   refreshRecentRuns();
@@ -332,12 +336,12 @@ function renderAgents(specialists) {
     card.className = "agent-card";
     card.innerHTML = `
       <div>
-        <h3>${escapeHtml(agent.agent)}</h3>
-        <span>${Math.round(agent.confidence * 100)}%</span>
+        <h3>${escapeHtml(valueOrNA(agent.agent))}</h3>
+        <span>${formatPercent(agent.confidence)}</span>
       </div>
-      <p>${escapeHtml(agent.finding)}</p>
-      <em>${escapeHtml(agent.mcp?.name || "No MCP")} · ${escapeHtml(agent.mcp?.action || "local")}</em>
-      <em>${escapeHtml(agent.model || "rule-fallback")} · ${agent.tokens?.total || 0} tokens${agent.fallback ? " · fallback" : ""}</em>
+      <p>${escapeHtml(valueOrNA(agent.finding))}</p>
+      <em>${escapeHtml(valueOrNA(agent.mcp?.name))} · ${escapeHtml(valueOrNA(agent.mcp?.action))}</em>
+      <em>${escapeHtml(valueOrNA(agent.model))} · ${escapeHtml(formatTokens(agent.tokens))}${agent.fallback ? " · fallback" : ""}</em>
       <small>${escapeHtml(formatEvidence(agent.evidence))}</small>
     `;
     return card;
@@ -351,9 +355,9 @@ function renderAudit(audit) {
     row.innerHTML = `
       <div class="audit-meta">
         <strong>${escapeHtml(item.agent)}</strong>
-        <span>${item.id} · ${item.elapsedMs}ms · $${item.cost.toFixed(3)} · ${Math.round(item.confidence * 100)}%</span>
+        <span>${item.id} · ${formatLatency(item.latencyMs)} · ${formatPercent(item.confidence)}</span>
       </div>
-      ${item.model ? `<div class="mcp-chip">${escapeHtml(item.model)} / ${item.tokens?.total || 0} tokens${item.fallback ? " / fallback" : ""}</div>` : ""}
+      ${item.model ? `<div class="mcp-chip">${escapeHtml(item.model)} / ${escapeHtml(formatTokens(item.tokens))}${item.fallback ? " / fallback" : ""}</div>` : ""}
       ${item.mcp ? `<div class="mcp-chip">${escapeHtml(item.mcp.name)} / ${escapeHtml(item.mcp.action)} / ${escapeHtml(item.mcp.status)}</div>` : ""}
       ${item.reasoning ? `<p><b>Reasoning:</b> ${escapeHtml(String(item.reasoning))}</p>` : ""}
       <p><b>Input:</b> ${escapeHtml(String(item.input))}</p>
@@ -361,6 +365,64 @@ function renderAudit(audit) {
     `;
     return row;
   }));
+}
+
+function renderExecutionTimeline(events = []) {
+  if (!events.length) {
+    els.executionTimeline.replaceChildren(emptyTrace("No execution timeline available"));
+    return;
+  }
+  els.executionTimeline.replaceChildren(...events.map((event) => {
+    const details = document.createElement("details");
+    details.className = "trace-item";
+    details.innerHTML = `
+      <summary>
+        <span>${escapeHtml(formatTime(event.timestamp))}</span>
+        <strong>${escapeHtml(valueOrNA(event.label))}</strong>
+        <em>${escapeHtml(valueOrNA(event.type))}</em>
+      </summary>
+      <pre>${escapeHtml(JSON.stringify(event, null, 2))}</pre>
+    `;
+    return details;
+  }));
+}
+
+function renderQwenTrace(trace = []) {
+  if (!trace.length) {
+    els.qwenTrace.replaceChildren(emptyTrace("No Qwen calls available"));
+    return;
+  }
+  els.qwenTrace.replaceChildren(...trace.map((call) => {
+    const details = document.createElement("details");
+    details.className = "trace-item";
+    details.innerHTML = `
+      <summary>
+        <span>${escapeHtml(formatTime(call.timestamp))}</span>
+        <strong>${escapeHtml(valueOrNA(call.agent || call.role))}</strong>
+        <em>${escapeHtml(valueOrNA(call.model))} · ${escapeHtml(formatLatency(call.latencyMs))} · ${escapeHtml(formatTokens(call.usage))}</em>
+      </summary>
+      <section class="trace-block"><h3>System Prompt</h3><pre>${escapeHtml(valueOrNA(call.systemPrompt))}</pre></section>
+      <section class="trace-block"><h3>User Prompt</h3><pre>${escapeHtml(valueOrNA(call.userPrompt))}</pre></section>
+      <section class="trace-block"><h3>Raw Response</h3><pre>${escapeHtml(valueOrNA(call.rawResponse))}</pre></section>
+      <section class="trace-block"><h3>Parsed Response</h3><pre>${escapeHtml(JSON.stringify(call.parsedResponse ?? null, null, 2))}</pre></section>
+      <section class="trace-block"><h3>Runtime</h3><pre>${escapeHtml(JSON.stringify({
+        provider: call.provider ?? null,
+        finishReason: call.finishReason ?? null,
+        usage: call.usage ?? null,
+        latencyMs: call.latencyMs ?? null,
+        timestamp: call.timestamp ?? null,
+        error: call.error ?? null
+      }, null, 2))}</pre></section>
+    `;
+    return details;
+  }));
+}
+
+function emptyTrace(text) {
+  const article = document.createElement("article");
+  article.className = "trace-empty";
+  article.textContent = text;
+  return article;
 }
 
 function renderMcps(mcps = []) {
@@ -388,7 +450,8 @@ function renderMcpTrace(trace = []) {
       <span>${String(index + 1).padStart(2, "0")}</span>
       <div>
         <strong>${escapeHtml(call.name)} / ${escapeHtml(call.action)}</strong>
-        <p>${escapeHtml(call.result)}</p>
+        <p>${escapeHtml(call.note || "")}</p>
+        <pre>${escapeHtml(JSON.stringify({ request: call.request, response: call.response, latencyMs: call.latencyMs, status: call.status }, null, 2))}</pre>
       </div>
     `;
     return row;
@@ -403,7 +466,7 @@ function renderRecentRuns(runs = []) {
       <strong>${escapeHtml(run.runId)} · ${escapeHtml(run.incidentId)} · ${escapeHtml(run.severity)}</strong>
       <span>${escapeHtml(run.service)} / ${escapeHtml(run.route?.name || "route")} / ${escapeHtml(run.gate)} / ${escapeHtml(run.verification)}</span>
       <span>${escapeHtml(run.adjudication?.rootCause || "no root cause")} · ${escapeHtml(run.gateReason || "no gate reason")}</span>
-      <small>${escapeHtml(run.startedAt)} · ${run.totals.calls} calls · $${run.totals.cost.toFixed(3)}</small>
+      <small>${escapeHtml(run.startedAt)} · ${run.totals.calls} calls · cost ${escapeHtml(formatCost(run.totals.cost))}</small>
     `;
     return row;
   }));
@@ -423,7 +486,41 @@ function renderMetricDelta(before, after = {}) {
 function formatEvidence(evidence) {
   if (Array.isArray(evidence)) return evidence.join(" | ");
   if (evidence && typeof evidence === "object") return Object.entries(evidence).map(([key, value]) => `${labelFor(key)}=${Array.isArray(value) ? value.join(",") : value}`).join(" · ");
-  return evidence || "No supporting evidence";
+  return evidence || "Not available";
+}
+
+function valueOrNA(value) {
+  if (value === null || value === undefined || value === "") return "Not available";
+  return String(value);
+}
+
+function formatPercent(value) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "Not available";
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatCost(value) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "Not available";
+  return `$${value.toFixed(4)}`;
+}
+
+function formatLatency(value) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "Not available";
+  return `${Math.round(value)} ms`;
+}
+
+function formatTokens(tokens) {
+  if (!tokens) return "Tokens not available";
+  const total = tokens.total_tokens ?? tokens.total;
+  if (typeof total !== "number") return "Tokens not available";
+  return `${total} tokens`;
+}
+
+function formatTime(timestamp) {
+  if (!timestamp) return "Not available";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "Not available";
+  return date.toLocaleTimeString();
 }
 
 function labelFor(key) {
@@ -440,7 +537,7 @@ function setLoading(isLoading) {
 }
 
 function escapeHtml(value) {
-  return value
+  return String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")

@@ -12,13 +12,31 @@ export function qwenRuntimeConfig(env = process.env) {
 
 export async function qwenChatJson({ role, model, system, prompt, fallback, env = process.env }) {
   const config = qwenRuntimeConfig(env);
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
   if (!config.apiKeyConfigured || !config.liveEnabled) {
     return {
       ...fallback,
       provider: "local-fallback",
       fallback: config.apiKeyConfigured
         ? "Qwen credentials found, but QWEN_LIVE_CALLS is not true"
-        : "Qwen credentials missing; used deterministic local fallback"
+        : "Qwen credentials missing; used deterministic local fallback",
+      qwenCall: {
+        role,
+        model,
+        provider: "local-fallback",
+        systemPrompt: system,
+        userPrompt: prompt,
+        rawResponse: null,
+        parsedResponse: fallback,
+        usage: null,
+        finishReason: null,
+        timestamp: startedAt,
+        latencyMs: Date.now() - startedMs,
+        error: config.apiKeyConfigured
+          ? "Qwen credentials found, but QWEN_LIVE_CALLS is not true"
+          : "Qwen credentials missing; used deterministic local fallback"
+      }
     };
   }
 
@@ -51,12 +69,29 @@ export async function qwenChatJson({ role, model, system, prompt, fallback, env 
       const payload = await response.json();
       const content = payload?.choices?.[0]?.message?.content;
       const parsed = parseJsonObject(content);
+      const finishReason = payload?.choices?.[0]?.finish_reason || null;
+      const usage = payload.usage || null;
       return {
         ...fallback,
         ...parsed,
         provider: "qwen-live",
         rawModelResponse: content,
-        usage: payload.usage || null
+        usage,
+        finishReason,
+        qwenCall: {
+          role,
+          model,
+          provider: "qwen-live",
+          systemPrompt: system,
+          userPrompt: prompt,
+          rawResponse: content,
+          parsedResponse: parsed,
+          usage,
+          finishReason,
+          timestamp: startedAt,
+          latencyMs: Date.now() - startedMs,
+          error: null
+        }
       };
     } catch (error) {
       lastError = error;
@@ -66,7 +101,21 @@ export async function qwenChatJson({ role, model, system, prompt, fallback, env 
   return {
     ...fallback,
     provider: "local-fallback",
-    fallback: `Qwen ${role} call failed: ${lastError?.message || "unknown error"}`
+    fallback: `Qwen ${role} call failed: ${lastError?.message || "unknown error"}`,
+    qwenCall: {
+      role,
+      model,
+      provider: "local-fallback",
+      systemPrompt: system,
+      userPrompt: prompt,
+      rawResponse: null,
+      parsedResponse: fallback,
+      usage: null,
+      finishReason: null,
+      timestamp: startedAt,
+      latencyMs: Date.now() - startedMs,
+      error: `Qwen ${role} call failed: ${lastError?.message || "unknown error"}`
+    }
   };
 }
 

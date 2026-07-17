@@ -4,20 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trinetra</title>
-    <link rel="stylesheet" href="/styles.css?v=20260717-polish4" />
+    <link rel="stylesheet" href="/styles.css?v=20260717-runtime-trace" />
   </head>
   <body>
     <main class="shell">
       <header class="hero">
         <div>
-          <p class="eyebrow">Autonomous incident response</p>
+          <p class="eyebrow">Incident Response</p>
           <h1>Trinetra</h1>
-          <p class="subhead">A Qwen-native multi-agent SRE command center that sees incidents, reasons across signals, remediates safely, and verifies recovery.</p>
+          <p class="subhead">Internal AI SRE workflow for alert triage, agent reasoning, tool execution, verification, and audit review.</p>
         </div>
         <div class="hero-stats" aria-label="System status">
           <div><span>Agent calls</span><strong id="callCount">0</strong></div>
-          <div><span>Avg confidence</span><strong id="avgConfidence">--</strong></div>
-          <div><span>Cost</span><strong id="runCost">$0.000</strong></div>
+          <div><span>Known confidence</span><strong id="avgConfidence">Not available</strong></div>
+          <div><span>Cost</span><strong id="runCost">Not available</strong></div>
         </div>
       </header>
 
@@ -48,8 +48,8 @@
       <section id="demoPanel" class="demo-overview">
         <div>
           <p class="eyebrow">Demo mode</p>
-          <h2>Pipeline and project tour</h2>
-          <p class="muted">Use this mode to explain the architecture without mutating the live storefront. It showcases the pipeline, repo layout, and simulated MCP/model layers.</p>
+          <h2>Reasoning trace review</h2>
+          <p class="muted">Run an incident workflow and inspect the recorded prompts, model responses, tool calls, verification results, and JSONL audit output.</p>
         </div>
         <div class="demo-assets">
           <article><strong>Pipeline</strong><span>Commander -> Specialists -> Adjudication -> Triage -> Gate -> Verification</span></article>
@@ -80,11 +80,11 @@
 
         <article class="realtime-main">
           <div class="panel-heading">
-            <p class="eyebrow">Realtime operations</p>
+            <p class="eyebrow">Agent Execution</p>
             <span id="realtimeGeneratedAt">waiting</span>
           </div>
-          <h2>Live incident nervous system</h2>
-          <p class="muted">This mode is the production console for real Qwen calls and live MCP adapters. It shows model readiness, connector state, and the current incident decision stream.</p>
+          <h2>Runtime timeline</h2>
+          <p class="muted">Displays recorded runtime events from backend execution. Missing runtime values are shown as not available.</p>
           <div id="realtimeEvents" class="realtime-events"></div>
         </article>
 
@@ -132,8 +132,8 @@
 
         <section class="flow-panel" aria-label="Agent architecture">
           <div class="panel-heading">
-            <p class="eyebrow">Agent pipeline</p>
-            <span>tool-calling recovery path</span>
+            <p class="eyebrow">Execution graph</p>
+            <span>runtime nodes</span>
           </div>
           <div class="pipeline-grid">
             <div class="flow-layer ghost"><span>Ingest</span><small>Correlate alert context</small></div>
@@ -160,7 +160,7 @@
             <p id="gateAction" class="muted">--</p>
           </article>
           <article class="decision-card">
-            <p class="eyebrow">Tool-calling remediation</p>
+            <p class="eyebrow">Tool Execution</p>
             <div id="remediationTimeline" class="tool-timeline"></div>
           </article>
           <article class="decision-card">
@@ -174,34 +174,52 @@
       <section class="lower-grid">
         <article class="agents-panel">
           <div class="panel-heading">
-            <p class="eyebrow">Specialist findings</p>
-            <span>weighted negotiation</span>
+            <p class="eyebrow">Agent outputs</p>
+            <span>runtime values only</span>
           </div>
           <div id="agentCards" class="agent-cards"></div>
         </article>
 
         <article class="audit-panel">
           <div class="panel-heading">
-            <p class="eyebrow">Audit and observability layer</p>
-            <span>input · output · confidence · cost</span>
+            <p class="eyebrow">Audit Log</p>
+            <span>persisted runtime entries</span>
           </div>
           <div id="auditRows" class="audit-rows"></div>
+        </article>
+      </section>
+
+      <section class="trace-section">
+        <article class="trace-panel">
+          <div class="panel-heading">
+            <p class="eyebrow">Execution timeline</p>
+            <span>recorded order</span>
+          </div>
+          <div id="executionTimeline" class="trace-list"></div>
+        </article>
+
+        <article class="trace-panel">
+          <div class="panel-heading">
+            <p class="eyebrow">Qwen conversation trace</p>
+            <span>prompts and raw responses</span>
+          </div>
+          <div id="qwenTrace" class="trace-list"></div>
         </article>
       </section>
 
       <section class="mcp-section">
         <article class="mcp-panel">
           <div class="panel-heading">
-            <p class="eyebrow">MCP connector registry</p>
-            <span>all tools behind adapters</span>
+          <p class="eyebrow">MCP connector registry</p>
+          <span>live or simulated</span>
           </div>
           <div id="mcpGrid" class="mcp-grid"></div>
         </article>
 
         <article class="mcp-panel">
           <div class="panel-heading">
-            <p class="eyebrow">MCP call trace</p>
-            <span>per incident run</span>
+          <p class="eyebrow">MCP activity</p>
+          <span>request and response</span>
           </div>
           <div id="mcpTrace" class="mcp-trace"></div>
         </article>
@@ -209,13 +227,13 @@
 
       <section class="runs-panel">
         <div class="panel-heading">
-          <p class="eyebrow">Persisted production runs</p>
+          <p class="eyebrow">Persisted runs</p>
           <span>JSONL audit store</span>
         </div>
         <div id="recentRuns" class="recent-runs"></div>
       </section>
     </main>
 
-    <script type="module" src="/app.js?v=20260717-polish2"></script>
+    <script type="module" src="/app.js?v=20260717-runtime-trace"></script>
   </body>
 </html>

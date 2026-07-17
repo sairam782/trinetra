@@ -535,8 +535,7 @@ const server = http.createServer(async (req, res) => {
         gate: result.gate.kind,
         verification: result.verification.status,
         qwenLive: result.qwen.runtime.liveEnabled,
-        calls: result.totals.calls,
-        cost: result.totals.cost
+        calls: result.totals.calls
       }).catch(() => {});
       sendJson(res, 200, result, requestId);
       return;
@@ -690,9 +689,10 @@ async function orchestrateIncident({ incidentKey = "latency", approval = "pendin
     confidence: commander.confidence,
     cost: 0.006,
     model: qwenModels.commander,
-    tokens: tokenUsage(incident.alert, commander.routing),
+    tokens: commander.tokens,
     reasoning: route.reason,
     branch: route.name,
+    qwenCall: commander.qwenCall,
     mcp: useMcp(mcpTrace, "tickets", "create_incident", `${incident.id} severity field set to ${commander.severity}`)
   });
 
@@ -727,6 +727,7 @@ async function orchestrateIncident({ incidentKey = "latency", approval = "pendin
       tokens: result.tokens,
       fallback: result.fallback,
       reasoning: result.reasoning,
+      qwenCall: result.qwenCall,
       mcp: result.mcp
     });
   }
@@ -755,6 +756,7 @@ async function orchestrateIncident({ incidentKey = "latency", approval = "pendin
     tokens: triage.tokens,
     fallback: triage.fallback,
     reasoning: triage.reasoning,
+    qwenCall: triage.qwenCall,
     mcp: useMcp(mcpTrace, "memory", "semantic_search", `${runbook.id} matched for ${incident.service}`)
   });
 
@@ -782,6 +784,7 @@ async function orchestrateIncident({ incidentKey = "latency", approval = "pendin
     fallback: remediationPlan.fallback,
     reasoning: remediationPlan.reasoning,
     branch: remediationPlan.status,
+    qwenCall: remediationPlan.qwenCall,
     mcp: useMcp(mcpTrace, "deploy", "execute_tool_sequence", remediationPlan.toolsExecuted.map((tool) => tool.name).join(" -> ") || "none")
   });
 
@@ -861,30 +864,108 @@ async function orchestrateIncident({ incidentKey = "latency", approval = "pendin
     audit,
     mcps: mcpRegistry,
     mcpTrace,
+    qwenTrace: buildQwenTrace(audit, remediationPlan),
+    executionTimeline: buildExecutionTimeline(audit, mcpTrace, remediationPlan, verification),
     totals: {
-      cost: Number(audit.reduce((sum, item) => sum + item.cost, 0).toFixed(3)),
-      confidence: Number((audit.reduce((sum, item) => sum + item.confidence, 0) / audit.length).toFixed(2)),
+      cost: null,
+      confidence: averageKnownConfidence(audit),
       calls: audit.length
     }
   };
 }
 
-function logCall(audit, agent, { input, output, confidence, cost, mcp = null, model = null, tokens = null, reasoning = null, branch = null, fallback = null }) {
+function buildQwenTrace(audit, remediationPlan) {
+  const trace = audit.filter((item) => item.qwenCall).map((item) => ({ agent: item.agent, ...item.qwenCall }));
+  const remediationCalls = Array.isArray(remediationPlan?.qwenCalls) ? remediationPlan.qwenCalls : [];
+  for (const call of remediationCalls) {
+    if (!trace.some((item) => item.timestamp === call.timestamp && item.role === call.role && item.rawResponse === call.rawResponse)) {
+      trace.push({ agent: "AI remediation agent", ...call });
+    }
+  }
+  return trace.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+}
+
+function buildExecutionTimeline(audit, mcpTrace, remediationPlan, verification) {
+  const entries = [];
+  for (const item of audit) {
+    entries.push({
+      type: item.qwenCall ? "qwen" : "step",
+      label: item.agent,
+      timestamp: item.timestamp,
+      output: item.output ?? null,
+      confidence: item.confidence ?? null,
+      latencyMs: item.latencyMs ?? null,
+      model: item.model ?? null,
+      tokens: item.tokens ?? null,
+      qwenCall: item.qwenCall ?? null,
+      mcp: item.mcp ?? null
+    });
+  }
+
+  for (const tool of remediationPlan?.toolsExecuted || []) {
+    entries.push({
+      type: "tool",
+      label: tool.name,
+      timestamp: tool.startedAt || null,
+      decidedBy: tool.decidedBy || null,
+      args: tool.args || {},
+      result: tool.result || null,
+      latencyMs: tool.latencyMs ?? null,
+      rollback: Boolean(tool.rollback)
+    });
+  }
+
+  for (const call of mcpTrace || []) {
+    entries.push({
+      type: "mcp",
+      label: call.name,
+      timestamp: call.timestamp || null,
+      request: call.request || `${call.action}()`,
+      response: call.response || call.result || null,
+      latencyMs: call.latencyMs ?? null,
+      simulation: call.status === "simulated",
+      status: call.status
+    });
+  }
+
+  entries.push({
+    type: "verification",
+    label: "Verification",
+    timestamp: new Date().toISOString(),
+    status: verification?.status || null,
+    result: verification || null
+  });
+
+  return entries.sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
+}
+
+function averageKnownConfidence(audit) {
+  const values = audit.map((item) => item.confidence).filter((value) => typeof value === "number");
+  if (!values.length) return null;
+  return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2));
+}
+
+function logCall(audit, agent, { input, output, confidence = null, cost = null, mcp = null, model = null, tokens = null, reasoning = null, branch = null, fallback = null, qwenCall = null, latencyMs = null, timestamp = null }) {
   const sequence = audit.length + 1;
+  const observedConfidence = qwenCall?.provider === "qwen-live" && qwenCall?.parsedResponse && typeof qwenCall.parsedResponse.confidence === "number"
+    ? qwenCall.parsedResponse.confidence
+    : null;
   const entry = {
     id: `CALL-${String(sequence).padStart(3, "0")}`,
     agent,
     input,
     output,
-    confidence,
-    cost,
+    confidence: typeof observedConfidence === "number" ? observedConfidence : null,
+    cost: null,
     mcp,
     model,
     tokens,
     reasoning,
     branch,
     fallback,
-    elapsedMs: 160 + sequence * 47
+    qwenCall,
+    latencyMs: qwenCall?.latencyMs ?? latencyMs ?? null,
+    timestamp: timestamp || qwenCall?.timestamp || new Date().toISOString()
   };
   audit.push(entry);
   return entry;
@@ -931,20 +1012,37 @@ async function runQwenAgent(role, input, buildOutput) {
   const forcedFailure = process.env.FORCE_QWEN_FAILURE_ROLE === role || process.env.FORCE_QWEN_FAILURE_ROLE === "all";
   const fallback = buildOutput();
   if (forcedFailure) {
+    const forcedStartedAt = new Date().toISOString();
     return {
       ...fallback,
       model,
       provider: "local-fallback",
-      tokens: tokenUsage(JSON.stringify(input), JSON.stringify(fallback)),
+      tokens: null,
       fallback: `Qwen ${model} timed out or returned malformed output twice; used deterministic fallback`,
-      latencyMs: 1250
+      latencyMs: 0,
+      qwenCall: {
+        role,
+        model,
+        provider: "local-fallback",
+        systemPrompt: null,
+        userPrompt: null,
+        rawResponse: null,
+        parsedResponse: fallback,
+        usage: null,
+        finishReason: null,
+        timestamp: forcedStartedAt,
+        latencyMs: 0,
+        error: "Forced local fallback"
+      }
     };
   }
+  const systemPrompt = "You are Trinetra, a production incident-response agent. Return compact JSON only. Preserve numeric confidence fields between 0 and 1.";
+  const userPrompt = buildAgentPrompt(role, input, fallback);
   const output = await qwenChatJson({
     role,
     model,
-    system: "You are Trinetra, a production incident-response agent. Return compact JSON only. Preserve numeric confidence fields between 0 and 1.",
-    prompt: buildAgentPrompt(role, input, fallback),
+    system: systemPrompt,
+    prompt: userPrompt,
     fallback
   });
   const stableOutput = {
@@ -958,8 +1056,23 @@ async function runQwenAgent(role, input, buildOutput) {
       input: stableOutput.usage.prompt_tokens || stableOutput.usage.input_tokens || 0,
       output: stableOutput.usage.completion_tokens || stableOutput.usage.output_tokens || 0,
       total: stableOutput.usage.total_tokens || 0
-    } : tokenUsage(JSON.stringify(input), JSON.stringify(stableOutput)),
-    latencyMs: stableOutput.provider === "qwen-live" ? null : 420 + Object.keys(qwenModels).indexOf(role) * 30
+    } : null,
+    latencyMs: stableOutput.qwenCall?.latencyMs ?? null,
+    finishReason: stableOutput.finishReason || stableOutput.qwenCall?.finishReason || null,
+    qwenCall: stableOutput.qwenCall || {
+      role,
+      model,
+      provider: stableOutput.provider || "unknown",
+      systemPrompt,
+      userPrompt,
+      rawResponse: stableOutput.rawModelResponse || null,
+      parsedResponse: stableOutput,
+      usage: stableOutput.usage || null,
+      finishReason: stableOutput.finishReason || null,
+      timestamp: new Date().toISOString(),
+      latencyMs: null,
+      error: null
+    }
   };
 }
 
@@ -985,12 +1098,19 @@ function tokenUsage(input, output) {
 
 function useMcp(trace, id, action, result) {
   const connector = mcpRegistry.find((item) => item.id === id);
+  const liveRequested = process.env[`MCP_${id.toUpperCase()}_LIVE`] === "true";
   const call = {
     id,
     name: connector?.name || id,
     action,
-    status: connector?.status || "simulated",
-    result
+    status: liveRequested ? "live-requested" : "simulated",
+    request: `${action}()`,
+    response: result,
+    result,
+    latencyMs: null,
+    timestamp: new Date().toISOString(),
+    simulation: !liveRequested,
+    note: liveRequested ? "Live connector requested" : "Simulation: no live connector configured; returned replay dataset"
   };
   trace.push(call);
   return call;
@@ -1022,20 +1142,28 @@ async function persistRun(result) {
     gateReason: result.gate.reason,
     adjudication: result.adjudication,
     verification: result.verification.status,
+    verificationDetail: result.verification,
     memoryUpdate: result.memoryUpdate,
+    qwenTrace: result.qwenTrace,
+    executionTimeline: result.executionTimeline,
+    remediationPlan: result.remediationPlan,
+    mcpTrace: result.mcpTrace,
     totals: result.totals,
-    audit: result.audit.map(({ id, agent, output, confidence, cost, mcp, elapsedMs, model, tokens, reasoning, branch, fallback }) => ({
+    audit: result.audit.map(({ id, agent, input, output, confidence, cost, mcp, latencyMs, timestamp, model, tokens, reasoning, branch, fallback, qwenCall }) => ({
       id,
       agent,
+      input,
       output,
       confidence,
       cost,
-      elapsedMs,
+      latencyMs,
+      timestamp,
       model,
       tokens,
       reasoning,
       branch,
       fallback,
+      qwenCall,
       mcp: mcp ? { id: mcp.id, action: mcp.action, status: mcp.status } : null
     }))
   };
@@ -1086,7 +1214,7 @@ async function realtimeStatus(requestId) {
     },
     remediation: {
       mode: remediationExecutionMode,
-      status: remediationExecutionMode === "execute" ? "mutating actions enabled" : "dry-run recommendations only"
+      status: remediationExecutionMode || null
     },
     mcps,
     latestRun: latest,
@@ -1114,22 +1242,15 @@ async function buildMcpStatus() {
 }
 
 function buildRealtimeEvents(latest) {
-  const baseline = [
-    { stage: "watch", status: "active", text: "Polling alert, log, metric, trace, runbook, and approval adapters." },
-    { stage: "models", status: qwenConfig.liveEnabled ? "live" : "shadow", text: qwenConfig.liveEnabled ? "Qwen live calls enabled through DashScope compatible mode." : "Set QWEN_LIVE_CALLS=true with Qwen credentials to leave fallback mode." },
-    { stage: "remediation", status: remediationExecutionMode, text: remediationExecutionMode === "execute" ? "Runbook executors may mutate the target system." : "Runbook executors produce plans without mutating the target system." },
-    { stage: "mcps", status: "shadow", text: `${mcpRegistry.length} MCP adapters registered. Promote adapters from simulated to live one by one.` }
-  ];
-
-  if (!latest) return baseline;
-
-  return [
-    ...baseline,
-    { stage: "latest-run", status: "observed", text: `${latest.runId} handled ${latest.incidentId} with ${latest.severity} severity.` },
-    { stage: "route", status: latest.route?.name || "unknown", text: `Route: ${latest.route?.name || "not recorded"}.` },
-    { stage: "gate", status: latest.gate, text: `Remediation branch: ${latest.gate}. ${latest.gateReason}` },
-    { stage: "verification", status: latest.verification.includes("verified") ? "healthy" : "attention", text: latest.verification }
-  ];
+  if (!latest?.executionTimeline?.length) {
+    return [{ stage: "Not available", status: "Not available", text: "No persisted execution timeline is available yet." }];
+  }
+  return latest.executionTimeline.map((event) => ({
+    stage: event.label || event.type || "Not available",
+    status: event.type || "Not available",
+    text: event.output || event.status || event.response || event.result?.status || "Not available",
+    timestamp: event.timestamp || null
+  }));
 }
 
 function shutdown(signal) {
@@ -1287,6 +1408,7 @@ async function runTriageAgent(incident, adjudication, commander, fallbackRunbook
     tokens: result.tokens,
     fallback: result.fallback,
     provider: result.provider,
+    qwenCall: result.qwenCall,
     reasoning: result.reasoning || `Qwen triage selected ${selected.id} for ${incident.service}`
   };
 }
@@ -1346,7 +1468,8 @@ async function runRemediationAgent(incident, triage, gate, specialists = []) {
     model: result.model,
     tokens: result.tokens,
     fallback: result.fallback,
-    provider: result.provider
+    provider: result.provider,
+    qwenCall: result.qwenCall
   };
 }
 
@@ -1367,7 +1490,7 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
       toolsExecuted: [],
       timeline: [{ status: "blocked", label: "Remediation gate blocked execution", detail: gate.reason }],
       model: qwenModels.remediation,
-      tokens: tokenUsage(gate.reason, "blocked"),
+      tokens: null,
       provider: "local-policy"
     };
   }
@@ -1387,7 +1510,7 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
       toolsExecuted: [],
       timeline: fallback.toolCalls.map((call) => ({ status: "planned", label: `Selected tool: ${call.name}()`, detail: "Dry-run mode skipped execution" })),
       model: qwenModels.remediation,
-      tokens: tokenUsage(JSON.stringify(incident), JSON.stringify(fallback)),
+      tokens: null,
       provider: "local-policy"
     };
   }
@@ -1398,6 +1521,7 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
     { status: "completed", label: "Root cause identified", detail: triage.rootCause }
   ];
   const toolsExecuted = [];
+  const qwenCalls = [];
   let lastResult = null;
   let finalResponse = null;
   let totalTokens = { input: 0, output: 0, total: 0 };
@@ -1406,6 +1530,7 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
 
   for (let iteration = 0; iteration < 6; iteration += 1) {
     const agentStep = await askRemediationToolAgent(incident, triage, gate, specialists, transcript, fallback);
+    if (agentStep.qwenCall) qwenCalls.push(agentStep.qwenCall);
     provider = agentStep.provider || provider;
     fallbackReason = fallbackReason || agentStep.fallback || null;
     totalTokens = addTokenUsage(totalTokens, agentStep.tokens);
@@ -1427,7 +1552,15 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
           message: `Rejected unavailable tool '${call.name}'`
         };
         transcript.push({ role: "tool", name: call.name, result: rejected });
-        toolsExecuted.push({ name: call.name, result: rejected });
+        toolsExecuted.push({
+          name: call.name,
+          args: call.args || {},
+          decidedBy: "Qwen remediation agent",
+          reason: call.reason || null,
+          result: rejected,
+          startedAt: new Date().toISOString(),
+          latencyMs: 0
+        });
         timeline.push({ status: "blocked", label: `Rejected tool: ${call.name}()`, detail: "Tool is not in the remediation registry" });
         finalResponse = {
           status: "escalate_to_human",
@@ -1438,9 +1571,20 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
       }
 
       timeline.push({ status: "selected", label: `Selected tool: ${call.name}()`, detail: call.reason || "Qwen selected this registered backend tool" });
+      const toolStartedAt = new Date().toISOString();
+      const toolStartedMs = Date.now();
       const result = remediationTools[call.name]({ incident, gate, triage, args: call.args || {} });
+      const toolExecution = {
+        name: call.name,
+        args: call.args || {},
+        decidedBy: "Qwen remediation agent",
+        reason: call.reason || null,
+        result,
+        startedAt: toolStartedAt,
+        latencyMs: Date.now() - toolStartedMs
+      };
       transcript.push({ role: "tool", name: call.name, result });
-      toolsExecuted.push({ name: call.name, result });
+      toolsExecuted.push(toolExecution);
       lastResult = result;
       timeline.push({ status: result.success === false || result.healthy === false ? "attention" : "completed", label: `Tool executed: ${call.name}()`, detail: result.message || JSON.stringify(result) });
 
@@ -1465,9 +1609,20 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
 
   if (!toolsExecuted.some((item) => item.name === "verify_demo")) {
     timeline.push({ status: "selected", label: "Selected tool: verify_demo()", detail: "Safety policy requires verification before finishing" });
+    const verifyStartedAt = new Date().toISOString();
+    const verifyStartedMs = Date.now();
     const verifyResult = remediationTools.verify_demo({ incident, gate, triage, args: {} });
+    const verifyExecution = {
+      name: "verify_demo",
+      args: {},
+      decidedBy: "Policy enforcement",
+      reason: "Safety policy requires verification before finishing",
+      result: verifyResult,
+      startedAt: verifyStartedAt,
+      latencyMs: Date.now() - verifyStartedMs
+    };
     transcript.push({ role: "tool", name: "verify_demo", result: verifyResult });
-    toolsExecuted.push({ name: "verify_demo", result: verifyResult });
+    toolsExecuted.push(verifyExecution);
     lastResult = verifyResult;
     timeline.push({ status: verifyResult.healthy ? "completed" : "attention", label: "Tool executed: verify_demo()", detail: verifyResult.message });
     if (!verifyResult.healthy) {
@@ -1496,9 +1651,11 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
     transcript,
     lastToolResult: lastResult,
     model: qwenModels.remediation,
-    tokens: totalTokens.total ? totalTokens : tokenUsage(JSON.stringify(incident), JSON.stringify(toolsExecuted)),
+    tokens: totalTokens.total ? totalTokens : null,
     fallback: fallbackReason,
-    provider
+    provider,
+    qwenCalls,
+    qwenCall: qwenCalls.at(-1) || null
   };
 }
 
@@ -1669,13 +1826,17 @@ const remediationTools = {
 
 function runToolRollback({ incident, gate, triage, timeline, toolsExecuted, transcript }) {
   timeline.push({ status: "attention", label: "Verification failed", detail: "Rollback policy triggered restart_demo() and verify_demo()" });
+  const restartStartedAt = new Date().toISOString();
+  const restartStartedMs = Date.now();
   const restartResult = remediationTools.restart_demo({ incident, gate, triage, args: {} });
   transcript.push({ role: "tool", name: "restart_demo", result: restartResult });
-  toolsExecuted.push({ name: "restart_demo", result: restartResult, rollback: true });
+  toolsExecuted.push({ name: "restart_demo", args: {}, decidedBy: "Rollback policy", reason: "Verification failed", result: restartResult, rollback: true, startedAt: restartStartedAt, latencyMs: Date.now() - restartStartedMs });
   timeline.push({ status: "completed", label: "Rollback tool executed: restart_demo()", detail: restartResult.message });
+  const verifyStartedAt = new Date().toISOString();
+  const verifyStartedMs = Date.now();
   const verifyResult = remediationTools.verify_demo({ incident, gate, triage, args: {} });
   transcript.push({ role: "tool", name: "verify_demo", result: verifyResult });
-  toolsExecuted.push({ name: "verify_demo", result: verifyResult, rollback: true });
+  toolsExecuted.push({ name: "verify_demo", args: {}, decidedBy: "Rollback policy", reason: "Verify after rollback restart", result: verifyResult, rollback: true, startedAt: verifyStartedAt, latencyMs: Date.now() - verifyStartedMs });
   timeline.push({ status: verifyResult.healthy ? "completed" : "attention", label: "Rollback verification: verify_demo()", detail: verifyResult.message });
   return { healthy: verifyResult.healthy, lastResult: verifyResult };
 }
