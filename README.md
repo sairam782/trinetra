@@ -122,7 +122,7 @@ The remediation phase is intentionally constrained. Qwen never receives shell ac
 - `enable_catalog_cache()`
 - `verify_demo()`
 
-The backend execution loop validates every tool name against the registry, executes the approved backend function, appends the tool result to the agent transcript, and requires `verify_demo()` before the incident can be marked resolved. If verification fails, Trinetra runs the rollback path (`restart_demo()` followed by `verify_demo()`) and escalates to a human if the system is still unhealthy.
+The backend execution loop validates every tool name against the registry, executes the approved backend function, appends the tool result to the agent transcript, and requires `verify_demo()` before the incident can be marked resolved. These tools repair the demo application's desired configuration and runtime state; they do not flip a generic success flag. `restart_demo()` reloads repaired configuration into the active storefront runtime, `reload_cache()` refreshes the active CSS/config cache, and `verify_demo()` renders the storefront and checks for healthy page signals before declaring success. If verification fails, Trinetra runs the rollback path (`restart_demo()` followed by `verify_demo()`) and escalates to a human if the system is still unhealthy.
 
 To enable real Qwen calls through Alibaba Cloud Model Studio / DashScope compatible mode:
 

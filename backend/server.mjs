@@ -146,13 +146,29 @@ const demoFailures = {
   }
 };
 const demoSiteState = {
-  broken: true,
   failureId: "missingConfig",
   error: demoFailures.missingConfig.error,
   lastInjectedAt: new Date().toISOString(),
   lastFixedAt: null,
   lastAction: "initial injected failure"
 };
+
+const defaultFeaturedProducts = [
+  { name: "Ridge Pack 32L", description: "Balanced trail storage with weatherproof zips.", price: "$129", icon: "bag" },
+  { name: "Stormline Shell", description: "Lightweight protection for unpredictable weather.", price: "$188", icon: "jacket" },
+  { name: "Camp Lantern Pro", description: "Warm, packable light with 36-hour battery life.", price: "$64", icon: "lantern" }
+];
+
+const defaultDemoConfig = Object.freeze({
+  featuredProducts: defaultFeaturedProducts,
+  paymentWidgetVersion: "stable",
+  criticalCssManifest: { available: true, path: "/assets/storefront-critical.css", hash: "storefront-critical.v1.css" },
+  inventoryMapperVersion: "v3-compatible",
+  catalogCacheEnabled: true
+});
+
+let desiredDemoConfig = cloneDemoConfig(defaultDemoConfig);
+let activeDemoConfig = corruptDemoConfig(cloneDemoConfig(defaultDemoConfig), "missingConfig");
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -1596,51 +1612,57 @@ const remediationTools = {
   restore_feature_config: Object.assign(({ incident }) => {
     const failure = incident.demoFailure || currentDemoFailure();
     if (failure.id !== "missingConfig") return { success: false, message: `restore_feature_config is not valid for ${failure.id}` };
-    fixDemoSite({ action: "FEATURED_PRODUCTS restored", runbookId: "tool:restore_feature_config", failureId: failure.id });
-    return { success: true, message: "FEATURED_PRODUCTS restored" };
+    desiredDemoConfig.featuredProducts = cloneDemoConfig(defaultFeaturedProducts);
+    demoSiteState.lastAction = "tool:restore_feature_config repaired desired FEATURED_PRODUCTS config";
+    return { success: true, message: "FEATURED_PRODUCTS restored in desired config" };
   }, { description: "Restore FEATURED_PRODUCTS configuration." }),
-  restart_demo: Object.assign(() => ({
-    success: true,
-    message: "Demo restarted"
-  }), { description: "Simulate restarting the demo storefront." }),
+  restart_demo: Object.assign(() => {
+    activeDemoConfig = cloneDemoConfig(desiredDemoConfig);
+    demoSiteState.lastAction = "tool:restart_demo reloaded repaired storefront runtime";
+    return {
+      success: true,
+      message: "Demo restarted and active runtime reinitialized from desired config"
+    };
+  }, { description: "Reload the demo storefront runtime from repaired configuration." }),
   reload_cache: Object.assign(() => ({
     success: true,
-    message: "Configuration cache reloaded"
+    message: reloadDemoCache()
   }), { description: "Reload storefront configuration cache." }),
   pin_payment_widget: Object.assign(({ incident }) => {
     const failure = incident.demoFailure || currentDemoFailure();
     if (failure.id !== "paymentScript") return { success: false, message: `pin_payment_widget is not valid for ${failure.id}` };
-    fixDemoSite({ action: "Payment widget pinned to stable version", runbookId: "tool:pin_payment_widget", failureId: failure.id });
-    return { success: true, message: "Payment widget version restored" };
+    desiredDemoConfig.paymentWidgetVersion = "stable";
+    demoSiteState.lastAction = "tool:pin_payment_widget repaired desired payment widget version";
+    return { success: true, message: "Payment widget version restored in desired config" };
   }, { description: "Restore payment widget version." }),
   restore_css: Object.assign(({ incident }) => {
     const failure = incident.demoFailure || currentDemoFailure();
     if (failure.id !== "cssAsset") return { success: false, message: `restore_css is not valid for ${failure.id}` };
-    fixDemoSite({ action: "Critical CSS asset restored", runbookId: "tool:restore_css", failureId: failure.id });
-    return { success: true, message: "Critical CSS asset restored" };
+    desiredDemoConfig.criticalCssManifest = cloneDemoConfig(defaultDemoConfig.criticalCssManifest);
+    demoSiteState.lastAction = "tool:restore_css repaired desired CSS asset manifest";
+    return { success: true, message: "Critical CSS asset restored in desired manifest" };
   }, { description: "Restore missing CSS asset." }),
   clear_inventory_mapper: Object.assign(({ incident }) => {
     const failure = incident.demoFailure || currentDemoFailure();
     if (failure.id !== "inventoryDrift") return { success: false, message: `clear_inventory_mapper is not valid for ${failure.id}` };
-    fixDemoSite({ action: "Inventory compatibility mapper restored", runbookId: "tool:clear_inventory_mapper", failureId: failure.id });
-    return { success: true, message: "Inventory compatibility mapper restored" };
+    desiredDemoConfig.inventoryMapperVersion = "v3-compatible";
+    demoSiteState.lastAction = "tool:clear_inventory_mapper repaired desired inventory mapper";
+    return { success: true, message: "Inventory compatibility mapper restored in desired config" };
   }, { description: "Restore inventory compatibility mapper." }),
   enable_catalog_cache: Object.assign(({ incident }) => {
     const failure = incident.demoFailure || currentDemoFailure();
     if (failure.id !== "apiTimeout") return { success: false, message: `enable_catalog_cache is not valid for ${failure.id}` };
-    fixDemoSite({ action: "Cached catalog fallback enabled", runbookId: "tool:enable_catalog_cache", failureId: failure.id });
-    return { success: true, message: "Cached catalog fallback enabled" };
+    desiredDemoConfig.catalogCacheEnabled = true;
+    demoSiteState.lastAction = "tool:enable_catalog_cache repaired desired catalog fallback";
+    return { success: true, message: "Cached catalog fallback enabled in desired config" };
   }, { description: "Enable cached catalog fallback." }),
   verify_demo: Object.assign(({ incident }) => {
-    const status = demoSiteStatus();
-    const forcedFailure = process.env.FORCE_VERIFICATION_FAIL === incident.id || process.env.FORCE_VERIFICATION_FAIL === "all";
+    const validation = validateRenderedDemoApplication();
     return {
-      healthy: forcedFailure ? false : status.healthy,
-      status: forcedFailure ? 500 : status.httpStatus,
-      success: forcedFailure ? false : status.healthy,
-      message: forcedFailure
-        ? "Demo verification forced unhealthy"
-        : status.healthy ? `Demo healthy with status ${status.httpStatus}` : `Demo unhealthy with status ${status.httpStatus}`
+      healthy: validation.healthy,
+      status: validation.status,
+      success: validation.healthy,
+      message: validation.message
     };
   }, { description: "Run the existing demo storefront verification check." })
 };
@@ -2013,24 +2035,119 @@ function buildStatusUpdate(incident, commander, gate, verification) {
   return `${incident.id} ${commander.severity}: ${incident.service} root cause identified. Gate=${gate.label}. Verification=${verification.status}.`;
 }
 
-function demoSiteStatus() {
-  const failure = currentDemoFailure();
+function cloneDemoConfig(config) {
+  return JSON.parse(JSON.stringify(config));
+}
+
+function corruptDemoConfig(config, failureId) {
+  const next = cloneDemoConfig(config);
+  if (failureId === "missingConfig") next.featuredProducts = null;
+  if (failureId === "paymentScript") next.paymentWidgetVersion = "next";
+  if (failureId === "cssAsset") next.criticalCssManifest = { available: false, path: "/assets/storefront-critical.css", hash: "missing" };
+  if (failureId === "inventoryDrift") next.inventoryMapperVersion = "legacy-stock-v2";
+  if (failureId === "apiTimeout") next.catalogCacheEnabled = false;
+  return next;
+}
+
+function detectDemoConfigFailure(config = activeDemoConfig) {
+  if (!Array.isArray(config.featuredProducts) || config.featuredProducts.length === 0) return "missingConfig";
+  if (config.paymentWidgetVersion !== "stable") return "paymentScript";
+  if (!config.criticalCssManifest?.available || config.criticalCssManifest.path !== "/assets/storefront-critical.css") return "cssAsset";
+  if (config.inventoryMapperVersion !== "v3-compatible") return "inventoryDrift";
+  if (!config.catalogCacheEnabled) return "apiTimeout";
+  return null;
+}
+
+function validateDemoApplication() {
+  const failureId = detectDemoConfigFailure(activeDemoConfig);
+  const failure = failureId ? demoFailures[failureId] : null;
+  const forcedFailure = process.env.FORCE_VERIFICATION_FAIL === "INC-7424" || process.env.FORCE_VERIFICATION_FAIL === "all";
+  if (forcedFailure) {
+    return {
+      healthy: false,
+      failureId: failureId || demoSiteState.failureId,
+      status: 500,
+      error: "ForcedVerificationError: demo verification forced unhealthy"
+    };
+  }
   return {
-    healthy: !demoSiteState.broken,
+    healthy: !failure,
+    failureId: failure?.id || demoSiteState.failureId,
+    status: failure ? failure.httpStatus : 200,
+    error: failure ? failure.error : null
+  };
+}
+
+function validateRenderedDemoApplication() {
+  const validation = validateDemoApplication();
+  const html = renderDemoStore();
+  const currentFailure = currentDemoFailure();
+  const containsErrorShell = html.includes("Synthetic check failed") || html.includes(currentFailure.error);
+  const containsHealthySignals = html.includes("Synthetic check: 200 OK")
+    && html.includes("Inventory synced")
+    && html.includes("Checkout widget healthy")
+    && html.includes("Critical CSS loaded");
+  const healthy = validation.healthy && validation.status === 200 && !containsErrorShell && containsHealthySignals;
+  if (healthy) {
+    demoSiteState.error = null;
+    demoSiteState.lastFixedAt = new Date().toISOString();
+  }
+  return {
+    healthy,
+    status: healthy ? 200 : validation.status,
+    message: healthy
+      ? "Demo rendered successfully with healthy storefront signals"
+      : `Demo render validation failed: ${validation.error || "healthy markers missing"}`
+  };
+}
+
+function reloadDemoCache() {
+  activeDemoConfig.criticalCssManifest = cloneDemoConfig(desiredDemoConfig.criticalCssManifest);
+  demoSiteState.lastAction = "tool:reload_cache loaded repaired CSS/config cache into active runtime";
+  return "Configuration cache reloaded from desired config";
+}
+
+function productIcon(icon) {
+  const icons = { bag: "🎒", jacket: "🧥", lantern: "🏕️" };
+  return icons[icon] || "•";
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function demoSiteStatus() {
+  const validation = validateDemoApplication();
+  const failure = demoFailures[validation.failureId] || currentDemoFailure();
+  return {
+    healthy: validation.healthy,
     failureId: failure.id,
     failureLabel: failure.label,
-    httpStatus: demoSiteState.broken ? failure.httpStatus : 200,
-    error: demoSiteState.broken ? demoSiteState.error : null,
-    symptom: demoSiteState.broken ? failure.symptom : "Storefront is healthy",
+    httpStatus: validation.status,
+    error: validation.error,
+    symptom: validation.healthy ? "Storefront is healthy" : failure.symptom,
     lastInjectedAt: demoSiteState.lastInjectedAt,
     lastFixedAt: demoSiteState.lastFixedAt,
-    lastAction: demoSiteState.lastAction
+    lastAction: demoSiteState.lastAction,
+    runtime: {
+      featuredProducts: Boolean(activeDemoConfig.featuredProducts?.length),
+      paymentWidgetVersion: activeDemoConfig.paymentWidgetVersion,
+      criticalCss: activeDemoConfig.criticalCssManifest?.available ? "loaded" : "missing",
+      inventoryMapperVersion: activeDemoConfig.inventoryMapperVersion,
+      catalogCacheEnabled: activeDemoConfig.catalogCacheEnabled
+    }
   };
 }
 
 function injectDemoSiteError(failureId = "missingConfig") {
   const failure = demoFailures[failureId] || demoFailures.missingConfig;
-  demoSiteState.broken = true;
+  desiredDemoConfig = corruptDemoConfig(cloneDemoConfig(defaultDemoConfig), failure.id);
+  activeDemoConfig = corruptDemoConfig(cloneDemoConfig(defaultDemoConfig), failure.id);
   demoSiteState.failureId = failure.id;
   demoSiteState.error = failure.error;
   demoSiteState.lastInjectedAt = new Date().toISOString();
@@ -2039,15 +2156,18 @@ function injectDemoSiteError(failureId = "missingConfig") {
 }
 
 function fixDemoSite({ action = "restored storefront", runbookId = "manual", failureId = demoSiteState.failureId } = {}) {
-  demoSiteState.broken = false;
-  demoSiteState.error = null;
+  desiredDemoConfig = cloneDemoConfig(defaultDemoConfig);
+  activeDemoConfig = cloneDemoConfig(defaultDemoConfig);
+  const validation = validateDemoApplication();
+  demoSiteState.error = validation.error;
   demoSiteState.lastFixedAt = new Date().toISOString();
   demoSiteState.lastAction = `${runbookId}: ${action} for ${failureId}`;
 }
 
 function renderDemoStore() {
-  const failure = currentDemoFailure();
-  if (demoSiteState.broken) {
+  const validation = validateDemoApplication();
+  const failure = demoFailures[validation.failureId] || currentDemoFailure();
+  if (!validation.healthy) {
     return `<!doctype html>
 <html lang="en">
   <head>
@@ -2073,7 +2193,7 @@ function renderDemoStore() {
       <p>Demo storefront</p>
       <h1>${failure.label}</h1>
       <p>${failure.symptom}</p>
-      <code>${demoSiteState.error}</code>
+      <code>${validation.error}</code>
       <p><a href="/">Open Trinetra</a> to diagnose and remediate this incident.</p>
       <div class="grid">
         <div class="tile"><h3>Trail Pack</h3><p>Unavailable while incident is active.</p></div>
@@ -2091,6 +2211,7 @@ function renderDemoStore() {
 </html>`;
   }
 
+  const products = activeDemoConfig.featuredProducts || [];
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -2133,9 +2254,8 @@ function renderDemoStore() {
     <main>
       <div class="toolbar"><h2>Featured products</h2><div class="status">Synthetic check: 200 OK</div></div>
       <section class="grid">
-        <article><div class="photo">🎒</div><div><h2>Ridge Pack 32L</h2><p>Balanced trail storage with weatherproof zips.</p><span>$129</span><button>Add to cart</button></div></article>
-        <article><div class="photo">🧥</div><div><h2>Stormline Shell</h2><p>Lightweight protection for unpredictable weather.</p><span>$188</span><button>Add to cart</button></div></article>
-        <article><div class="photo">🏕️</div><div><h2>Camp Lantern Pro</h2><p>Warm, packable light with 36-hour battery life.</p><span>$64</span><button>Add to cart</button></div></article>
+        ${products.map((product) => `
+        <article><div class="photo">${productIcon(product.icon)}</div><div><h2>${escapeHtml(product.name)}</h2><p>${escapeHtml(product.description)}</p><span>${escapeHtml(product.price)}</span><button>Add to cart</button></div></article>`).join("")}
       </section>
     </main>
     <footer>Inventory synced · Checkout widget healthy · Critical CSS loaded</footer>
