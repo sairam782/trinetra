@@ -55,7 +55,7 @@ Trinetra has two dashboard modes:
 3. Click **Inject error**.
 4. Click **Open website** and show `/demo-store` returning the selected failure.
 5. Click **Run Trinetra pipeline**.
-6. Trinetra runs the incident pipeline, asks Qwen to triage the root cause, asks the AI remediation agent to choose the concrete `RB-777` repair, validates the AI plan against allowed runbook actions, executes it when remediation is enabled, and records the full reasoning chain.
+6. Trinetra runs the incident pipeline, asks Qwen to triage the root cause, then runs an autonomous remediation agent that may call only registered backend tools such as `restore_feature_config()`, `pin_payment_widget()`, `restart_demo()`, and `verify_demo()`.
 7. By default, execution is dry-run only, so `/demo-store` stays broken while Trinetra shows the planned action. Set `REMEDIATION_EXECUTION_MODE=execute` only when you want the executor to mutate the target website.
 
 Available failure modes:
@@ -108,6 +108,21 @@ The smoke test covers:
 - Override one agent with `QWEN_MODEL_COMMANDER`, `QWEN_MODEL_LOGS`, `QWEN_MODEL_METRICS`, `QWEN_MODEL_TRACES`, `QWEN_MODEL_MEMORY`, `QWEN_MODEL_TRIAGE`, `QWEN_MODEL_REMEDIATION`, `QWEN_MODEL_COMMUNICATION`, or `QWEN_MODEL_DOCUMENTATION`
 
 Local runs are deterministic without credentials, but each agent call still records model, token estimate, confidence, latency, fallback state, MCP action, and reasoning.
+
+## Agentic Remediation Tool Calling
+
+The remediation phase is intentionally constrained. Qwen never receives shell access, filesystem access, or arbitrary edit capability. It receives incident context, specialist findings, the matched runbook, and a registry of safe tools:
+
+- `restore_feature_config()`
+- `restart_demo()`
+- `reload_cache()`
+- `pin_payment_widget()`
+- `restore_css()`
+- `clear_inventory_mapper()`
+- `enable_catalog_cache()`
+- `verify_demo()`
+
+The backend execution loop validates every tool name against the registry, executes the approved backend function, appends the tool result to the agent transcript, and requires `verify_demo()` before the incident can be marked resolved. If verification fails, Trinetra runs the rollback path (`restart_demo()` followed by `verify_demo()`) and escalates to a human if the system is still unhealthy.
 
 To enable real Qwen calls through Alibaba Cloud Model Studio / DashScope compatible mode:
 

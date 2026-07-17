@@ -38,6 +38,7 @@ const els = {
   gateAction: document.querySelector("#gateAction"),
   verificationStatus: document.querySelector("#verificationStatus"),
   metricDelta: document.querySelector("#metricDelta"),
+  remediationTimeline: document.querySelector("#remediationTimeline"),
   agentCards: document.querySelector("#agentCards"),
   auditRows: document.querySelector("#auditRows"),
   mcpGrid: document.querySelector("#mcpGrid"),
@@ -104,7 +105,7 @@ async function runAgents() {
 }
 
 function render(data) {
-  const { incident, commander, specialists, adjudication, triage, gate, verification, audit, totals, mcps, mcpTrace, runId, requestId, mode, route, qwen } = data;
+  const { incident, commander, specialists, adjudication, triage, remediationPlan, gate, verification, audit, totals, mcps, mcpTrace, runId, requestId, mode, route, qwen } = data;
   els.modeText.textContent = mode;
   els.runIdText.textContent = runId;
   els.requestIdText.textContent = requestId;
@@ -128,11 +129,46 @@ function render(data) {
   els.gateAction.textContent = `${gate.action}. Reason: ${gate.reason}. Risk: ${triage.runbook.risk}. Steps: ${triage.runbook.steps.join(" -> ")}.`;
   els.verificationStatus.textContent = verification.status;
   renderMetricDelta(incident.metrics, verification.after);
+  renderRemediationTimeline(remediationPlan);
   renderAgents(specialists);
   renderAudit(audit);
   renderMcps(mcps);
   renderMcpTrace(mcpTrace);
   refreshRecentRuns();
+}
+
+function renderRemediationTimeline(remediationPlan = {}) {
+  const timeline = remediationPlan.timeline || [];
+  if (!timeline.length) {
+    els.remediationTimeline.replaceChildren(emptyTimelineRow("Waiting for remediation agent"));
+    return;
+  }
+  els.remediationTimeline.replaceChildren(...timeline.slice(-10).map((event) => {
+    const row = document.createElement("article");
+    row.className = `tool-step ${event.status || "pending"}`;
+    row.innerHTML = `
+      <span>${statusMark(event.status)}</span>
+      <div>
+        <strong>${escapeHtml(event.label || "Tool step")}</strong>
+        <p>${escapeHtml(event.detail || "")}</p>
+      </div>
+    `;
+    return row;
+  }));
+}
+
+function emptyTimelineRow(text) {
+  const row = document.createElement("article");
+  row.className = "tool-step pending";
+  row.innerHTML = `<span>·</span><div><strong>${escapeHtml(text)}</strong><p>Run the pipeline to see tool calls.</p></div>`;
+  return row;
+}
+
+function statusMark(status) {
+  if (status === "completed") return "✓";
+  if (status === "attention" || status === "blocked") return "!";
+  if (status === "selected") return "→";
+  return "•";
 }
 
 async function refreshOpsStatus() {

@@ -605,6 +605,57 @@ dd {
   line-height: 1.4;
 }
 
+.tool-timeline {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.tool-step {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+
+.tool-step span {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid rgb(137 230 185 / 38%);
+  color: #89e6b9;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.tool-step.attention span,
+.tool-step.blocked span {
+  border-color: rgb(255 116 116 / 55%);
+  color: #ff9b9b;
+}
+
+.tool-step.selected span,
+.tool-step.reasoning span {
+  border-color: rgb(245 183 89 / 54%);
+  color: #f5b759;
+}
+
+.tool-step strong {
+  display: block;
+  color: #f2f6f8;
+  font-size: 0.88rem;
+}
+
+.tool-step p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
 .mcp-section {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);

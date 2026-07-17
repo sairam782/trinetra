@@ -755,18 +755,18 @@ async function orchestrateIncident({ incidentKey = "latency", approval = "pendin
     mcp: useMcp(mcpTrace, gate.kind === "auto" || gate.kind === "approved" ? "deploy" : "chat", gate.kind === "auto" || gate.kind === "approved" ? gate.deployAction : "request_approval", gate.action)
   });
 
-  const remediationPlan = await runRemediationAgent(incident, triage, gate);
+  const remediationPlan = await runRemediationAgent(incident, triage, gate, specialists);
   logCall(audit, "AI remediation agent", {
     input: `${gate.label}; ${triage.runbook.id}`,
-    output: remediationPlan.action,
+    output: remediationPlan.summary,
     confidence: remediationPlan.confidence,
     cost: 0.006,
     model: remediationPlan.model,
     tokens: remediationPlan.tokens,
     fallback: remediationPlan.fallback,
     reasoning: remediationPlan.reasoning,
-    branch: remediationPlan.approved ? "ai-plan-approved" : "ai-plan-rejected",
-    mcp: useMcp(mcpTrace, "deploy", "plan_remediation", remediationPlan.action)
+    branch: remediationPlan.status,
+    mcp: useMcp(mcpTrace, "deploy", "execute_tool_sequence", remediationPlan.toolsExecuted.map((tool) => tool.name).join(" -> ") || "none")
   });
 
   const verification = verifyOutcome(incident, gate, remediationPlan);
@@ -1275,7 +1275,11 @@ async function runTriageAgent(incident, adjudication, commander, fallbackRunbook
   };
 }
 
-async function runRemediationAgent(incident, triage, gate) {
+async function runRemediationAgent(incident, triage, gate, specialists = []) {
+  if (gate.deployAction === "restore_website_config") {
+    return runToolCallingRemediationAgent(incident, triage, gate, specialists);
+  }
+
   const failure = incident.demoFailure || null;
   const allowedActions = allowedRemediationActions(incident, gate);
   const fallbackAction = allowedActions.find((item) => item.failureId === failure?.id)?.action || allowedActions[0]?.action || gate.deployAction || "no-op";
@@ -1314,11 +1318,344 @@ async function runRemediationAgent(incident, triage, gate) {
   const validated = validateRemediationPlan(result, fallback, allowedActions, gate);
   return {
     ...validated,
+    status: validated.approved ? "ai-plan-approved" : "ai-plan-rejected",
+    service: incident.service,
+    summary: validated.action,
+    toolsExecuted: [],
+    timeline: [{
+      status: validated.approved ? "completed" : "blocked",
+      label: validated.action,
+      detail: validated.reasoning
+    }],
     model: result.model,
     tokens: result.tokens,
     fallback: result.fallback,
     provider: result.provider
   };
+}
+
+async function runToolCallingRemediationAgent(incident, triage, gate, specialists = []) {
+  const approvedByGate = ["auto", "approved"].includes(gate.kind);
+  const fallback = buildFallbackToolPlan(incident, gate);
+  if (!approvedByGate) {
+    return {
+      approved: false,
+      status: "blocked_by_gate",
+      service: incident.service,
+      summary: "No remediation tools executed",
+      action: "none",
+      confidence: 0.86,
+      reasoning: `Tool-calling remediation blocked because gate kind is ${gate.kind}`,
+      expectedOutcome: "await approval or escalation",
+      rollback: gate.runbook?.rollback || "escalate to on-call",
+      toolsExecuted: [],
+      timeline: [{ status: "blocked", label: "Remediation gate blocked execution", detail: gate.reason }],
+      model: qwenModels.remediation,
+      tokens: tokenUsage(gate.reason, "blocked"),
+      provider: "local-policy"
+    };
+  }
+
+  if (remediationExecutionMode !== "execute") {
+    return {
+      approved: true,
+      status: "dry_run",
+      dryRun: true,
+      service: incident.service,
+      summary: `Dry-run tool plan: ${fallback.toolCalls.map((call) => call.name).join(" -> ")}`,
+      action: fallback.toolCalls.map((call) => call.name).join(" -> "),
+      confidence: 0.9,
+      reasoning: "Remediation tools were planned but not executed because REMEDIATION_EXECUTION_MODE is not execute",
+      expectedOutcome: "service remains unchanged in dry-run mode",
+      rollback: gate.runbook?.rollback || "escalate to on-call",
+      toolsExecuted: [],
+      timeline: fallback.toolCalls.map((call) => ({ status: "planned", label: `Selected tool: ${call.name}()`, detail: "Dry-run mode skipped execution" })),
+      model: qwenModels.remediation,
+      tokens: tokenUsage(JSON.stringify(incident), JSON.stringify(fallback)),
+      provider: "local-policy"
+    };
+  }
+
+  const transcript = [];
+  const timeline = [
+    { status: "completed", label: "Logs analyzed", detail: specialists.find((item) => item.agent === "Logs agent")?.finding || "Logs incorporated" },
+    { status: "completed", label: "Root cause identified", detail: triage.rootCause }
+  ];
+  const toolsExecuted = [];
+  let lastResult = null;
+  let finalResponse = null;
+  let totalTokens = { input: 0, output: 0, total: 0 };
+  let provider = "local-fallback";
+  let fallbackReason = null;
+
+  for (let iteration = 0; iteration < 6; iteration += 1) {
+    const agentStep = await askRemediationToolAgent(incident, triage, gate, specialists, transcript, fallback);
+    provider = agentStep.provider || provider;
+    fallbackReason = fallbackReason || agentStep.fallback || null;
+    totalTokens = addTokenUsage(totalTokens, agentStep.tokens);
+    if (agentStep.reasoning) {
+      timeline.push({ status: "reasoning", label: "AI reasoning", detail: agentStep.reasoning });
+    }
+
+    const toolCalls = normalizeToolCalls(agentStep.toolCalls || agentStep.tools || agentStep.tool_calls || []);
+    if (!toolCalls.length) {
+      finalResponse = agentStep;
+      break;
+    }
+
+    for (const call of toolCalls) {
+      if (!remediationTools[call.name]) {
+        const rejected = {
+          tool: call.name,
+          success: false,
+          message: `Rejected unavailable tool '${call.name}'`
+        };
+        transcript.push({ role: "tool", name: call.name, result: rejected });
+        toolsExecuted.push({ name: call.name, result: rejected });
+        timeline.push({ status: "blocked", label: `Rejected tool: ${call.name}()`, detail: "Tool is not in the remediation registry" });
+        finalResponse = {
+          status: "escalate_to_human",
+          reasoning: rejected.message,
+          confidence: 0.7
+        };
+        break;
+      }
+
+      timeline.push({ status: "selected", label: `Selected tool: ${call.name}()`, detail: call.reason || "Qwen selected this registered backend tool" });
+      const result = remediationTools[call.name]({ incident, gate, triage, args: call.args || {} });
+      transcript.push({ role: "tool", name: call.name, result });
+      toolsExecuted.push({ name: call.name, result });
+      lastResult = result;
+      timeline.push({ status: result.success === false || result.healthy === false ? "attention" : "completed", label: `Tool executed: ${call.name}()`, detail: result.message || JSON.stringify(result) });
+
+      if (call.name === "verify_demo" && result.healthy === false) {
+        const rollback = runToolRollback({ incident, gate, triage, timeline, toolsExecuted, transcript });
+        lastResult = rollback.lastResult;
+        finalResponse = {
+          status: rollback.healthy ? "recovered_after_rollback" : "escalate_to_human",
+          reasoning: rollback.healthy ? "Verification recovered after rollback restart and re-check" : "Verification failed after rollback attempt; escalate to human",
+          confidence: rollback.healthy ? 0.88 : 0.65
+        };
+        break;
+      }
+    }
+
+    if (finalResponse) break;
+    if (toolsExecuted.some((item) => item.name === "verify_demo" && item.result.healthy)) {
+      finalResponse = agentStep;
+      break;
+    }
+  }
+
+  if (!toolsExecuted.some((item) => item.name === "verify_demo")) {
+    timeline.push({ status: "selected", label: "Selected tool: verify_demo()", detail: "Safety policy requires verification before finishing" });
+    const verifyResult = remediationTools.verify_demo({ incident, gate, triage, args: {} });
+    transcript.push({ role: "tool", name: "verify_demo", result: verifyResult });
+    toolsExecuted.push({ name: "verify_demo", result: verifyResult });
+    lastResult = verifyResult;
+    timeline.push({ status: verifyResult.healthy ? "completed" : "attention", label: "Tool executed: verify_demo()", detail: verifyResult.message });
+    if (!verifyResult.healthy) {
+      finalResponse = {
+        status: "verification_failed",
+        reasoning: "Policy verification failed after model tool sequence",
+        confidence: 0.68
+      };
+    }
+  }
+
+  const verified = toolsExecuted.some((item) => item.name === "verify_demo" && item.result.healthy);
+  const terminalStatus = verified ? "resolved" : finalResponse?.status || "verification_failed";
+  return {
+    approved: verified,
+    status: terminalStatus,
+    service: incident.service,
+    summary: verified ? "Incident resolved through Qwen-selected remediation tools" : terminalStatus === "escalate_to_human" ? "Escalate to Human" : "Verification failed after remediation tools",
+    action: toolsExecuted.map((tool) => tool.name).join(" -> ") || "none",
+    expectedOutcome: verified ? "storefront health restored" : "human escalation required",
+    rollback: gate.runbook?.rollback || "restart and re-verify before escalation",
+    confidence: normalizeConfidence(finalResponse?.confidence, verified ? 0.92 : 0.7),
+    reasoning: finalResponse?.reasoning || "Qwen selected registered backend tools and policy verification completed",
+    toolsExecuted,
+    timeline,
+    transcript,
+    lastToolResult: lastResult,
+    model: qwenModels.remediation,
+    tokens: totalTokens.total ? totalTokens : tokenUsage(JSON.stringify(incident), JSON.stringify(toolsExecuted)),
+    fallback: fallbackReason,
+    provider
+  };
+}
+
+async function askRemediationToolAgent(incident, triage, gate, specialists, transcript, fallback) {
+  const fallbackStep = nextFallbackToolStep(fallback, transcript);
+  const result = await runQwenAgent("remediation", {
+    incident: {
+      id: incident.id,
+      service: incident.service,
+      alert: incident.alert,
+      customerImpact: incident.customerImpact,
+      logs: incident.logs,
+      metrics: incident.metrics,
+      trace: specialists.find((item) => item.agent === "Trace agent")?.finding || incident.demoFailure?.trace || null,
+      historicalMemory: specialists.find((item) => item.agent === "Historical memory")?.finding || null,
+      demoFailure: incident.demoFailure
+    },
+    matchedRunbook: triage.runbook,
+    availableTools: remediationToolDescriptions(),
+    transcript,
+    instruction: [
+      "You are Trinetra's autonomous remediation agent.",
+      "Your job is to restore service health.",
+      "You CANNOT execute arbitrary code.",
+      "You MAY ONLY call the provided tools.",
+      "Choose the minimum number of tools required.",
+      "Always call verify_demo before finishing.",
+      "Return JSON with reasoning, toolCalls, status, confidence.",
+      "Each toolCalls item must be { name, args, reason }.",
+      "Do not hallucinate tools."
+    ].join(" ")
+  }, () => fallbackStep);
+  return {
+    ...result,
+    toolCalls: normalizeToolCalls(result.toolCalls || result.tools || result.tool_calls || fallbackStep.toolCalls)
+  };
+}
+
+function buildFallbackToolPlan(incident, gate) {
+  const failureId = incident.demoFailure?.id || "missingConfig";
+  const toolByFailure = {
+    missingConfig: "restore_feature_config",
+    paymentScript: "pin_payment_widget",
+    cssAsset: "restore_css",
+    inventoryDrift: "clear_inventory_mapper",
+    apiTimeout: "enable_catalog_cache"
+  };
+  const primaryTool = toolByFailure[failureId] || "restore_feature_config";
+  const secondaryTool = failureId === "cssAsset" ? "reload_cache" : "restart_demo";
+  return {
+    status: "tool_calls",
+    confidence: 0.9,
+    reasoning: `Fallback selected ${primaryTool} for ${failureId}, then ${secondaryTool}, then verify_demo`,
+    toolCalls: [
+      { name: primaryTool, args: {}, reason: `Repair active failure ${failureId}` },
+      { name: secondaryTool, args: {}, reason: "Load the repaired dependency/configuration" },
+      { name: "verify_demo", args: {}, reason: "Confirm service health before finishing" }
+    ]
+  };
+}
+
+function nextFallbackToolStep(fallback, transcript) {
+  const executed = transcript.filter((item) => item.role === "tool").map((item) => item.name);
+  const next = fallback.toolCalls.find((call) => !executed.includes(call.name));
+  if (!next) {
+    return {
+      status: "resolved",
+      confidence: fallback.confidence,
+      reasoning: "All fallback remediation tools have completed",
+      toolCalls: []
+    };
+  }
+  return {
+    status: "tool_calls",
+    confidence: fallback.confidence,
+    reasoning: fallback.reasoning,
+    toolCalls: [next]
+  };
+}
+
+function normalizeToolCalls(toolCalls) {
+  if (!Array.isArray(toolCalls)) return [];
+  return toolCalls
+    .map((call) => {
+      if (typeof call === "string") return { name: call, args: {}, reason: "" };
+      return {
+        name: String(call.name || call.tool || call.function || "").trim(),
+        args: call.args && typeof call.args === "object" ? call.args : {},
+        reason: String(call.reason || call.reasoning || "").trim()
+      };
+    })
+    .filter((call) => call.name);
+}
+
+function addTokenUsage(current, next = {}) {
+  return {
+    input: (current.input || 0) + (next.input || 0),
+    output: (current.output || 0) + (next.output || 0),
+    total: (current.total || 0) + (next.total || 0)
+  };
+}
+
+function remediationToolDescriptions() {
+  return Object.entries(remediationTools).map(([name, tool]) => ({
+    name,
+    description: tool.description
+  }));
+}
+
+const remediationTools = {
+  restore_feature_config: Object.assign(({ incident }) => {
+    const failure = incident.demoFailure || currentDemoFailure();
+    if (failure.id !== "missingConfig") return { success: false, message: `restore_feature_config is not valid for ${failure.id}` };
+    fixDemoSite({ action: "FEATURED_PRODUCTS restored", runbookId: "tool:restore_feature_config", failureId: failure.id });
+    return { success: true, message: "FEATURED_PRODUCTS restored" };
+  }, { description: "Restore FEATURED_PRODUCTS configuration." }),
+  restart_demo: Object.assign(() => ({
+    success: true,
+    message: "Demo restarted"
+  }), { description: "Simulate restarting the demo storefront." }),
+  reload_cache: Object.assign(() => ({
+    success: true,
+    message: "Configuration cache reloaded"
+  }), { description: "Reload storefront configuration cache." }),
+  pin_payment_widget: Object.assign(({ incident }) => {
+    const failure = incident.demoFailure || currentDemoFailure();
+    if (failure.id !== "paymentScript") return { success: false, message: `pin_payment_widget is not valid for ${failure.id}` };
+    fixDemoSite({ action: "Payment widget pinned to stable version", runbookId: "tool:pin_payment_widget", failureId: failure.id });
+    return { success: true, message: "Payment widget version restored" };
+  }, { description: "Restore payment widget version." }),
+  restore_css: Object.assign(({ incident }) => {
+    const failure = incident.demoFailure || currentDemoFailure();
+    if (failure.id !== "cssAsset") return { success: false, message: `restore_css is not valid for ${failure.id}` };
+    fixDemoSite({ action: "Critical CSS asset restored", runbookId: "tool:restore_css", failureId: failure.id });
+    return { success: true, message: "Critical CSS asset restored" };
+  }, { description: "Restore missing CSS asset." }),
+  clear_inventory_mapper: Object.assign(({ incident }) => {
+    const failure = incident.demoFailure || currentDemoFailure();
+    if (failure.id !== "inventoryDrift") return { success: false, message: `clear_inventory_mapper is not valid for ${failure.id}` };
+    fixDemoSite({ action: "Inventory compatibility mapper restored", runbookId: "tool:clear_inventory_mapper", failureId: failure.id });
+    return { success: true, message: "Inventory compatibility mapper restored" };
+  }, { description: "Restore inventory compatibility mapper." }),
+  enable_catalog_cache: Object.assign(({ incident }) => {
+    const failure = incident.demoFailure || currentDemoFailure();
+    if (failure.id !== "apiTimeout") return { success: false, message: `enable_catalog_cache is not valid for ${failure.id}` };
+    fixDemoSite({ action: "Cached catalog fallback enabled", runbookId: "tool:enable_catalog_cache", failureId: failure.id });
+    return { success: true, message: "Cached catalog fallback enabled" };
+  }, { description: "Enable cached catalog fallback." }),
+  verify_demo: Object.assign(({ incident }) => {
+    const status = demoSiteStatus();
+    const forcedFailure = process.env.FORCE_VERIFICATION_FAIL === incident.id || process.env.FORCE_VERIFICATION_FAIL === "all";
+    return {
+      healthy: forcedFailure ? false : status.healthy,
+      status: forcedFailure ? 500 : status.httpStatus,
+      success: forcedFailure ? false : status.healthy,
+      message: forcedFailure
+        ? "Demo verification forced unhealthy"
+        : status.healthy ? `Demo healthy with status ${status.httpStatus}` : `Demo unhealthy with status ${status.httpStatus}`
+    };
+  }, { description: "Run the existing demo storefront verification check." })
+};
+
+function runToolRollback({ incident, gate, triage, timeline, toolsExecuted, transcript }) {
+  timeline.push({ status: "attention", label: "Verification failed", detail: "Rollback policy triggered restart_demo() and verify_demo()" });
+  const restartResult = remediationTools.restart_demo({ incident, gate, triage, args: {} });
+  transcript.push({ role: "tool", name: "restart_demo", result: restartResult });
+  toolsExecuted.push({ name: "restart_demo", result: restartResult, rollback: true });
+  timeline.push({ status: "completed", label: "Rollback tool executed: restart_demo()", detail: restartResult.message });
+  const verifyResult = remediationTools.verify_demo({ incident, gate, triage, args: {} });
+  transcript.push({ role: "tool", name: "verify_demo", result: verifyResult });
+  toolsExecuted.push({ name: "verify_demo", result: verifyResult, rollback: true });
+  timeline.push({ status: verifyResult.healthy ? "completed" : "attention", label: "Rollback verification: verify_demo()", detail: verifyResult.message });
+  return { healthy: verifyResult.healthy, lastResult: verifyResult };
 }
 
 function chooseGate(commander, runbook, triage, approval, approverId) {
@@ -1441,6 +1778,22 @@ function verifyOutcome(incident, gate, remediationPlan = null) {
 }
 
 function executeRemediation(incident, gate, remediationPlan = null) {
+  if (remediationPlan?.service === "demo-storefront" || remediationPlan?.toolsExecuted) {
+    return {
+      executed: remediationPlan.status === "resolved",
+      dryRun: remediationPlan.dryRun || false,
+      service: incident.service,
+      action: remediationPlan.action || remediationPlan.summary || "tool-calling remediation",
+      status: remediationPlan.summary || remediationPlan.status,
+      failure: incident.demoFailure || null,
+      after: remediationPlan.status === "resolved"
+        ? { ...incident.metrics, syntheticStatus: 200, errorRate: 0.2, p95LatencyMs: 180, visualDiffScore: 0.02 }
+        : incident.metrics,
+      toolTimeline: remediationPlan.timeline || [],
+      toolsExecuted: remediationPlan.toolsExecuted || []
+    };
+  }
+
   if (!["auto", "approved"].includes(gate.kind)) {
     return {
       executed: false,
