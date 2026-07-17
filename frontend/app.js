@@ -85,16 +85,14 @@ function setMode(mode) {
 async function runAgents() {
   setLoading(true);
   try {
-    const response = await fetch("/api/incidents/analyze", {
+    render(await fetchJson("/api/incidents/analyze", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         incidentKey: els.incidentSelect.value,
         approval: els.approvalSelect.value
       })
-    });
-    if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-    render(await response.json());
+    }));
   } catch (error) {
     console.error(error);
     els.rootCause.textContent = "Could not run incident agents";
@@ -297,9 +295,35 @@ function renderRealtimeStatus(status) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
-  if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
-  return response.json();
+  if (typeof window.fetch === "function") {
+    const response = await window.fetch(url, options);
+    if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
+    return response.json();
+  }
+  return xhrJson(url, options);
+}
+
+function xhrJson(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open(options.method || "GET", url);
+    for (const [key, value] of Object.entries(options.headers || {})) {
+      request.setRequestHeader(key, value);
+    }
+    request.onload = () => {
+      if (request.status < 200 || request.status >= 300) {
+        reject(new Error(`${url} failed: ${request.status}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(request.responseText || "null"));
+      } catch {
+        reject(new Error(`${url} returned invalid JSON`));
+      }
+    };
+    request.onerror = () => reject(new Error(`${url} network error`));
+    request.send(options.body || null);
+  });
 }
 
 function renderAgents(specialists) {

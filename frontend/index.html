@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trinetra</title>
-    <link rel="stylesheet" href="/styles.css?v=20260713-modes" />
+    <link rel="stylesheet" href="/styles.css?v=20260717-polish4" />
   </head>
   <body>
     <main class="shell">
@@ -131,51 +131,20 @@
         </aside>
 
         <section class="flow-panel" aria-label="Agent architecture">
-          <div class="flow-layer ghost">
-            <span>Ingest and correlate</span>
-            <small>Dedup alerts, attach service context</small>
+          <div class="panel-heading">
+            <p class="eyebrow">Agent pipeline</p>
+            <span>tool-calling recovery path</span>
           </div>
-          <div class="flow-layer blue">
-            <span>Commander agent</span>
-            <small>Classifies severity and assigns path</small>
-          </div>
-          <div class="split">
-            <div class="flow-layer amber"><span>P1 fast-path</span><small>Human-visible gate</small></div>
-            <div class="flow-layer ghost"><span>P2-P4 standard</span><small>Normal investigation</small></div>
-          </div>
-          <div class="split three">
-            <div class="flow-layer green"><span>Logs agent</span><small>Parses streams</small></div>
-            <div class="flow-layer green"><span>Metrics agent</span><small>Detects anomalies</small></div>
-            <div class="flow-layer green"><span>Historical memory</span><small>Searches past cases</small></div>
-          </div>
-          <div class="flow-layer rust">
-            <span>Negotiation and adjudication</span>
-            <small>Weighted by confidence and evidence</small>
-          </div>
-          <div class="flow-layer blue">
-            <span>Triage agent</span>
-            <small>Root cause, confidence, blast radius</small>
-          </div>
-          <div class="split">
-            <div class="flow-layer ghost"><span>Runbook library</span><small>Approved fix patterns</small></div>
-            <div class="flow-layer ghost"><span>Remediation gate</span><small>Auto, approve, or escalate</small></div>
-          </div>
-          <div class="split three">
-            <div class="flow-layer lime"><span>Auto-execute</span><small>Low-risk only</small></div>
-            <div class="flow-layer amber"><span>Human approval</span><small>Approve/reject</small></div>
-            <div class="flow-layer ghost"><span>Escalate only</span><small>No fix without human</small></div>
-          </div>
-          <div class="flow-layer rust">
-            <span>Verification and rollback</span>
-            <small>Confirms fix or reverts</small>
-          </div>
-          <div class="split">
-            <div class="flow-layer blue"><span>Communication agent</span><small>Status updates</small></div>
-            <div class="flow-layer blue"><span>Documentation agent</span><small>Full reasoning trail</small></div>
-          </div>
-          <div class="flow-layer rust">
-            <span>Feedback to memory</span>
-            <small>Updates RAG store with outcome</small>
+          <div class="pipeline-grid">
+            <div class="flow-layer ghost"><span>Ingest</span><small>Correlate alert context</small></div>
+            <div class="flow-layer blue"><span>Commander</span><small>Severity and route</small></div>
+            <div class="flow-layer green"><span>Specialists</span><small>Logs · metrics · traces · memory</small></div>
+            <div class="flow-layer rust"><span>Adjudicate</span><small>Weighted root cause</small></div>
+            <div class="flow-layer blue"><span>Triage</span><small>Runbook match</small></div>
+            <div class="flow-layer amber"><span>Gate</span><small>Approval policy</small></div>
+            <div class="flow-layer lime"><span>Tool agent</span><small>Safe backend tools only</small></div>
+            <div class="flow-layer rust"><span>Verify</span><small>Recover or rollback</small></div>
+            <div class="flow-layer ghost"><span>Memory</span><small>Audit and outcome</small></div>
           </div>
         </section>
 
@@ -247,6 +216,6 @@
       </section>
     </main>
 
-    <script type="module" src="/app.js?v=20260713-modes"></script>
+    <script type="module" src="/app.js?v=20260717-polish2"></script>
   </body>
 </html>
