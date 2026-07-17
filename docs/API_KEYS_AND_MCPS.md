@@ -48,6 +48,7 @@ Minimum variables:
 QWEN_API_KEY=your_dashscope_key
 QWEN_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
 QWEN_MODEL_DEFAULT=qwen-plus
+QWEN_MODEL_REMEDIATION=qwen-plus
 QWEN_LIVE_CALLS=true
 ```
 
@@ -59,6 +60,7 @@ Recommended first run:
 QWEN_API_KEY=your_dashscope_key \
 QWEN_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1 \
 QWEN_MODEL_DEFAULT=qwen-plus \
+QWEN_MODEL_REMEDIATION=qwen-plus \
 QWEN_LIVE_CALLS=true \
 REMEDIATION_EXECUTION_MODE=dry-run \
 npm start
@@ -116,6 +118,7 @@ Trinetra currently exposes simulated MCP adapters in the UI. These env vars are 
    QWEN_API_KEY=your_dashscope_key \
    QWEN_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1 \
    QWEN_MODEL_DEFAULT=qwen-plus \
+   QWEN_MODEL_REMEDIATION=qwen-plus \
    QWEN_LIVE_CALLS=true \
    REMEDIATION_EXECUTION_MODE=dry-run \
    npm start
@@ -172,6 +175,7 @@ QWEN_API_KEY=
 DASHSCOPE_API_KEY=
 QWEN_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
 QWEN_MODEL_DEFAULT=qwen-plus
+QWEN_MODEL_REMEDIATION=qwen-plus
 QWEN_LIVE_CALLS=false
 QWEN_AGENT_TIMEOUT_MS=30000
 QWEN_AGENT_RETRY_COUNT=1

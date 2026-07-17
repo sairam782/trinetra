@@ -55,7 +55,7 @@ Trinetra has two dashboard modes:
 3. Click **Inject error**.
 4. Click **Open website** and show `/demo-store` returning the selected failure.
 5. Click **Run Trinetra pipeline**.
-6. Trinetra runs the incident pipeline, selects `RB-777`, passes the selected failure into the remediation executor, and records the full reasoning chain.
+6. Trinetra runs the incident pipeline, asks Qwen to triage the root cause, asks the AI remediation agent to choose the concrete `RB-777` repair, validates the AI plan against allowed runbook actions, executes it when remediation is enabled, and records the full reasoning chain.
 7. By default, execution is dry-run only, so `/demo-store` stays broken while Trinetra shows the planned action. Set `REMEDIATION_EXECUTION_MODE=execute` only when you want the executor to mutate the target website.
 
 Available failure modes:
@@ -105,7 +105,7 @@ The smoke test covers:
 
 - Default local/international model: `qwen-plus`
 - Override all agents with `QWEN_MODEL_DEFAULT`
-- Override one agent with `QWEN_MODEL_COMMANDER`, `QWEN_MODEL_LOGS`, `QWEN_MODEL_METRICS`, `QWEN_MODEL_TRACES`, `QWEN_MODEL_MEMORY`, `QWEN_MODEL_TRIAGE`, `QWEN_MODEL_COMMUNICATION`, or `QWEN_MODEL_DOCUMENTATION`
+- Override one agent with `QWEN_MODEL_COMMANDER`, `QWEN_MODEL_LOGS`, `QWEN_MODEL_METRICS`, `QWEN_MODEL_TRACES`, `QWEN_MODEL_MEMORY`, `QWEN_MODEL_TRIAGE`, `QWEN_MODEL_REMEDIATION`, `QWEN_MODEL_COMMUNICATION`, or `QWEN_MODEL_DOCUMENTATION`
 
 Local runs are deterministic without credentials, but each agent call still records model, token estimate, confidence, latency, fallback state, MCP action, and reasoning.
 
@@ -151,6 +151,7 @@ Important variables:
 - `QWEN_API_KEY` or `DASHSCOPE_API_KEY`
 - `QWEN_API_BASE_URL`
 - `QWEN_MODEL_DEFAULT`
+- `QWEN_MODEL_REMEDIATION`
 - `QWEN_LIVE_CALLS`
 - `REMEDIATION_EXECUTION_MODE`
 - `ALIBABA_CLOUD_REGION`
@@ -169,7 +170,6 @@ docker run --rm -p 4173:4173 trinetra
 
 ## Next Planned Modifications
 
-- Replace deterministic `runQwenAgent` output with live Qwen Cloud calls.
 - Replace simulated MCP adapters with real MCP clients.
 - Persist audit/memory to Alibaba RDS for PostgreSQL or PolarDB.
 - Add Slack interactive approval webhook.

@@ -36,6 +36,7 @@ const qwenModels = {
   metrics: process.env.QWEN_MODEL_METRICS || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
   traces: process.env.QWEN_MODEL_TRACES || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
   memory: process.env.QWEN_MODEL_MEMORY || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
+  remediation: process.env.QWEN_MODEL_REMEDIATION || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
   communication: process.env.QWEN_MODEL_COMMUNICATION || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
   triage: process.env.QWEN_MODEL_TRIAGE || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
   documentation: process.env.QWEN_MODEL_DOCUMENTATION || process.env.QWEN_MODEL_DEFAULT || "qwen-plus"
@@ -726,22 +727,18 @@ async function orchestrateIncident({ incidentKey = "latency", approval = "pendin
     branch: route.name
   });
 
-  const runbook = selectRunbook(incident, adjudication);
-  const triage = {
-    rootCause: adjudication.rootCause,
-    confidence: adjudication.confidence,
-    blastRadius: commander.blastRadius,
-    runbook,
-    model: qwenModels.triage
-  };
+  const fallbackRunbook = selectRunbook(incident, adjudication);
+  const triage = await runTriageAgent(incident, adjudication, commander, fallbackRunbook);
+  const runbook = triage.runbook;
   logCall(audit, "Triage agent", {
     input: adjudication.rootCause,
     output: `${runbook.id}: ${runbook.title}`,
-    confidence: Math.min(0.97, adjudication.confidence + 0.04),
+    confidence: triage.confidence,
     cost: 0.005,
-    model: qwenModels.triage,
-    tokens: tokenUsage(adjudication.rootCause, runbook.title),
-    reasoning: `Selected versioned approved runbook ${runbook.id}@${runbook.version} for ${incident.service}`,
+    model: triage.model,
+    tokens: triage.tokens,
+    fallback: triage.fallback,
+    reasoning: triage.reasoning,
     mcp: useMcp(mcpTrace, "memory", "semantic_search", `${runbook.id} matched for ${incident.service}`)
   });
 
@@ -758,7 +755,21 @@ async function orchestrateIncident({ incidentKey = "latency", approval = "pendin
     mcp: useMcp(mcpTrace, gate.kind === "auto" || gate.kind === "approved" ? "deploy" : "chat", gate.kind === "auto" || gate.kind === "approved" ? gate.deployAction : "request_approval", gate.action)
   });
 
-  const verification = verifyOutcome(incident, gate);
+  const remediationPlan = await runRemediationAgent(incident, triage, gate);
+  logCall(audit, "AI remediation agent", {
+    input: `${gate.label}; ${triage.runbook.id}`,
+    output: remediationPlan.action,
+    confidence: remediationPlan.confidence,
+    cost: 0.006,
+    model: remediationPlan.model,
+    tokens: remediationPlan.tokens,
+    fallback: remediationPlan.fallback,
+    reasoning: remediationPlan.reasoning,
+    branch: remediationPlan.approved ? "ai-plan-approved" : "ai-plan-rejected",
+    mcp: useMcp(mcpTrace, "deploy", "plan_remediation", remediationPlan.action)
+  });
+
+  const verification = verifyOutcome(incident, gate, remediationPlan);
   logCall(audit, "Verification and rollback", {
     input: gate.label,
     output: verification.status,
@@ -827,6 +838,7 @@ async function orchestrateIncident({ incidentKey = "latency", approval = "pendin
     specialists,
     adjudication,
     triage,
+    remediationPlan,
     gate,
     verification,
     memoryUpdate,
@@ -1235,6 +1247,80 @@ function selectRunbook(incident, adjudication) {
   return runbooks.find((book) => (book.service === incident.service || book.service === "*") && book.match.some((term) => corpus.includes(term))) || runbooks[0];
 }
 
+async function runTriageAgent(incident, adjudication, commander, fallbackRunbook) {
+  const fallback = {
+    rootCause: adjudication.rootCause,
+    confidence: adjudication.confidence,
+    blastRadius: commander.blastRadius,
+    matchedRunbookId: fallbackRunbook.id,
+    reasoning: `Qwen triage fallback selected ${fallbackRunbook.id} from adjudicated root cause and runbook corpus`
+  };
+  const result = await runQwenAgent("triage", {
+    incident,
+    adjudication,
+    commander,
+    runbooks: runbooks.map(({ id, title, service, risk, actionType, match, steps }) => ({ id, title, service, risk, actionType, match, steps }))
+  }, () => fallback);
+  const selected = runbooks.find((book) => book.id === result.matchedRunbookId) || fallbackRunbook;
+  return {
+    rootCause: String(result.rootCause || fallback.rootCause),
+    confidence: normalizeConfidence(result.confidence, fallback.confidence),
+    blastRadius: result.blastRadius || commander.blastRadius,
+    runbook: selected,
+    model: result.model,
+    tokens: result.tokens,
+    fallback: result.fallback,
+    provider: result.provider,
+    reasoning: result.reasoning || `Qwen triage selected ${selected.id} for ${incident.service}`
+  };
+}
+
+async function runRemediationAgent(incident, triage, gate) {
+  const failure = incident.demoFailure || null;
+  const allowedActions = allowedRemediationActions(incident, gate);
+  const fallbackAction = allowedActions.find((item) => item.failureId === failure?.id)?.action || allowedActions[0]?.action || gate.deployAction || "no-op";
+  const fallback = {
+    approved: ["auto", "approved"].includes(gate.kind),
+    failureId: failure?.id || null,
+    action: fallbackAction,
+    expectedOutcome: "restore service health and pass verification",
+    rollback: gate.runbook?.rollback || "escalate to on-call",
+    confidence: 0.9,
+    reasoning: `Fallback remediation plan selected an allowed ${gate.deployAction} action for ${incident.service}`
+  };
+  const result = await runQwenAgent("remediation", {
+    incident: {
+      id: incident.id,
+      service: incident.service,
+      alert: incident.alert,
+      customerImpact: incident.customerImpact,
+      metrics: incident.metrics,
+      demoFailure: failure
+    },
+    triage: {
+      rootCause: triage.rootCause,
+      confidence: triage.confidence,
+      runbook: triage.runbook
+    },
+    gate: {
+      kind: gate.kind,
+      label: gate.label,
+      deployAction: gate.deployAction,
+      reason: gate.reason
+    },
+    allowedActions,
+    instruction: "Pick exactly one allowed action. Do not invent shell commands, credentials, external calls, or unlisted fixes."
+  }, () => fallback);
+  const validated = validateRemediationPlan(result, fallback, allowedActions, gate);
+  return {
+    ...validated,
+    model: result.model,
+    tokens: result.tokens,
+    fallback: result.fallback,
+    provider: result.provider
+  };
+}
+
 function chooseGate(commander, runbook, triage, approval, approverId) {
   const allowedRunbook = runbook.approved && approvedRunbookAllowlist.has(runbook.id);
   const highConfidence = triage.confidence >= autoExecuteThreshold;
@@ -1275,6 +1361,17 @@ function chooseGate(commander, runbook, triage, approval, approverId) {
         : `mid/high risk or real blast radius requires Slack approval; timeout escalates to on-call`
     };
   }
+  if (approval === "approved" && slackApproverAllowlist.includes(approverId)) {
+    return {
+      kind: "approved",
+      label: "Human approved remediation",
+      confidence: triage.confidence,
+      action: `Proceeding with approved low-risk fix approved by ${approverId}`,
+      deployAction: runbook.actionType,
+      runbook,
+      reason: `authorized approver ${approverId}, low-risk runbook ${runbook.id}, confidence ${triage.confidence}`
+    };
+  }
   return {
     kind: "human",
     label: "Human approval recommended",
@@ -1286,7 +1383,7 @@ function chooseGate(commander, runbook, triage, approval, approverId) {
   };
 }
 
-function verifyOutcome(incident, gate) {
+function verifyOutcome(incident, gate, remediationPlan = null) {
   if (gate.kind === "human") {
     return {
       status: "Paused before remediation; Slack approval requested and on-call timeout armed",
@@ -1306,7 +1403,7 @@ function verifyOutcome(incident, gate) {
     };
   }
 
-  const remediation = executeRemediation(incident, gate);
+  const remediation = executeRemediation(incident, gate, remediationPlan);
   if (remediation.service === "demo-storefront") return verifyStorefrontOutcome(incident, gate, remediation);
   if (remediation.dryRun) {
     return {
@@ -1343,7 +1440,7 @@ function verifyOutcome(incident, gate) {
   };
 }
 
-function executeRemediation(incident, gate) {
+function executeRemediation(incident, gate, remediationPlan = null) {
   if (!["auto", "approved"].includes(gate.kind)) {
     return {
       executed: false,
@@ -1360,7 +1457,7 @@ function executeRemediation(incident, gate) {
 
   switch (gate.deployAction) {
     case "restore_website_config":
-      return executeStorefrontRemediation(incident, gate);
+      return executeStorefrontRemediation(incident, gate, remediationPlan);
     case "scale_workload":
       return simulatedRemediation(incident, gate, "scaled workload capacity and reduced retry pressure");
     case "clear_disk_space":
@@ -1396,6 +1493,68 @@ function planRemediation(incident, gate) {
   };
 }
 
+function allowedRemediationActions(incident, gate) {
+  if (gate.deployAction !== "restore_website_config") {
+    return [{ action: gate.deployAction || "none", failureId: null, description: gate.runbook?.title || "approved runbook action" }];
+  }
+  return Object.values(demoFailures).map((failure) => ({
+    failureId: failure.id,
+    action: storefrontActionForFailure(failure.id),
+    description: `${failure.label}: ${failure.fixSummary}`
+  }));
+}
+
+function storefrontActionForFailure(failureId) {
+  const actionByFailure = {
+    missingConfig: "restored FEATURED_PRODUCTS config",
+    apiTimeout: "enabled cached catalog fallback and lowered product feed timeout",
+    paymentScript: "pinned payment widget to stable bundle",
+    inventoryDrift: "applied inventory compatibility mapper",
+    cssAsset: "republished critical CSS and purged CDN asset manifest"
+  };
+  return actionByFailure[failureId] || "restore failed storefront dependency/config";
+}
+
+function validateRemediationPlan(result, fallback, allowedActions, gate) {
+  const requestedAction = String(result.action || "").trim();
+  const requestedFailureId = String(result.failureId || "").trim();
+  const allowed = allowedActions.find((item) => item.action === requestedAction)
+    || allowedActions.find((item) => item.failureId && item.failureId === requestedFailureId);
+  const approvedByGate = ["auto", "approved"].includes(gate.kind);
+  if (!approvedByGate) {
+    return {
+      ...fallback,
+      approved: false,
+      action: "none",
+      confidence: normalizeConfidence(result.confidence, fallback.confidence),
+      reasoning: `AI plan blocked because gate kind is ${gate.kind}`
+    };
+  }
+  if (!allowed) {
+    return {
+      ...fallback,
+      approved: true,
+      confidence: normalizeConfidence(result.confidence, fallback.confidence),
+      reasoning: `AI proposed '${requestedAction || "empty"}', which is not in the allowed runbook actions; using validated fallback '${fallback.action}'`
+    };
+  }
+  return {
+    approved: Boolean(result.approved ?? true),
+    failureId: allowed.failureId || fallback.failureId || null,
+    action: allowed.action,
+    expectedOutcome: result.expectedOutcome || fallback.expectedOutcome,
+    rollback: result.rollback || fallback.rollback,
+    confidence: normalizeConfidence(result.confidence, fallback.confidence),
+    reasoning: result.reasoning || `AI selected allowed runbook action '${allowed.action}'`
+  };
+}
+
+function normalizeConfidence(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return numeric > 1 ? Math.max(0, Math.min(1, numeric / 100)) : Math.max(0, Math.min(1, numeric));
+}
+
 function simulatedRemediation(incident, gate, action) {
   return {
     executed: true,
@@ -1406,16 +1565,9 @@ function simulatedRemediation(incident, gate, action) {
   };
 }
 
-function executeStorefrontRemediation(incident, gate) {
+function executeStorefrontRemediation(incident, gate, remediationPlan = null) {
   const failure = incident.demoFailure || currentDemoFailure();
-  const actionByFailure = {
-    missingConfig: "restored FEATURED_PRODUCTS config",
-    apiTimeout: "enabled cached catalog fallback and lowered product feed timeout",
-    paymentScript: "pinned payment widget to stable bundle",
-    inventoryDrift: "applied inventory compatibility mapper",
-    cssAsset: "republished critical CSS and purged CDN asset manifest"
-  };
-  const action = actionByFailure[failure.id] || failure.fixSummary;
+  const action = remediationPlan?.action || storefrontActionForFailure(failure.id);
 
   if (gate.runbook?.id !== "RB-777") {
     return {
@@ -1423,6 +1575,26 @@ function executeStorefrontRemediation(incident, gate) {
       service: "demo-storefront",
       action,
       status: `Refused storefront remediation because ${gate.runbook?.id || "no runbook"} is not RB-777`,
+      failure,
+      after: incident.metrics
+    };
+  }
+  if (!remediationPlan?.approved) {
+    return {
+      executed: false,
+      service: "demo-storefront",
+      action,
+      status: "AI remediation plan was not approved for execution",
+      failure,
+      after: incident.metrics
+    };
+  }
+  if (action !== storefrontActionForFailure(failure.id)) {
+    return {
+      executed: false,
+      service: "demo-storefront",
+      action,
+      status: `AI remediation action '${action}' does not match active failure '${failure.id}'`,
       failure,
       after: incident.metrics
     };
