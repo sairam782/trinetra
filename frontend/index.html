@@ -4,20 +4,28 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trinetra</title>
-    <link rel="stylesheet" href="/styles.css?v=20260717-runtime-trace" />
+    <link rel="icon" type="image/png" href="/assets/trinetra-mark-128.png" />
+    <link rel="stylesheet" href="/styles.css?v=20260717-enterprise-console" />
   </head>
   <body>
     <main class="shell">
-      <header class="hero">
-        <div>
-          <p class="eyebrow">Incident Response</p>
-          <h1>Trinetra</h1>
-          <p class="subhead">Internal AI SRE workflow for alert triage, agent reasoning, tool execution, verification, and audit review.</p>
+      <header class="console-header">
+        <div class="brand-lockup" aria-label="Trinetra">
+          <img class="brand-mark" src="/assets/trinetra-mark.png" alt="" aria-hidden="true" />
+          <div>
+            <h1>Trinetra</h1>
+            <p class="subhead">Incident Response</p>
+          </div>
         </div>
-        <div class="hero-stats" aria-label="System status">
+        <div class="incident-context" aria-label="Current incident context">
+          <div><span>Current incident</span><strong id="headerIncident">Not available</strong></div>
+          <div><span>Environment</span><strong>local</strong></div>
+          <div><span>Status</span><strong id="headerStatus">checking</strong></div>
+        </div>
+        <div class="hero-stats" aria-label="Run telemetry">
           <div><span>Agent calls</span><strong id="callCount">0</strong></div>
           <div><span>Known confidence</span><strong id="avgConfidence">Not available</strong></div>
-          <div><span>Cost</span><strong id="runCost">Not available</strong></div>
+          <div><span>Tokens</span><strong id="runCost">Not available</strong></div>
         </div>
       </header>
 
@@ -36,26 +44,26 @@
           </select>
         </div>
         <div class="field">
-          <label for="approvalSelect">Approval state</label>
+          <label for="approvalSelect">Approval request</label>
           <select id="approvalSelect">
             <option value="pending">Pending approval</option>
-            <option value="approved">Human approved</option>
+            <option value="approved">Requested approval</option>
           </select>
         </div>
-        <button id="runButton">Run demo pipeline</button>
+        <button id="runButton" class="primary-action">Run demo pipeline</button>
       </section>
 
       <section id="demoPanel" class="demo-overview">
         <div>
           <p class="eyebrow">Demo mode</p>
-          <h2>Reasoning trace review</h2>
-          <p class="muted">Run an incident workflow and inspect the recorded prompts, model responses, tool calls, verification results, and JSONL audit output.</p>
+          <h2>Recorded execution review</h2>
+          <p class="muted">Inspect persisted prompts, model responses, tool calls, verification results, MCP activity, and JSONL audit output.</p>
         </div>
         <div class="demo-assets">
           <article><strong>Pipeline</strong><span>Commander -> Specialists -> Adjudication -> Triage -> Gate -> Verification</span></article>
-          <article><strong>Frontend</strong><span>Dashboard, mode switch, realtime console, storefront viewer</span></article>
-          <article><strong>Backend</strong><span>Qwen-tiered orchestrator, runbooks, audit, memory, Alibaba proof</span></article>
-          <article><strong>Scripts</strong><span>Smoke test and model/MCP incubation guide</span></article>
+          <article><strong>Frontend</strong><span>Dashboard, runtime traces, realtime console, storefront viewer</span></article>
+          <article><strong>Backend</strong><span>Qwen orchestrator, safe tools, runbooks, audit, memory</span></article>
+          <article><strong>Scripts</strong><span>Smoke test, env validation, model and MCP setup</span></article>
         </div>
       </section>
 
@@ -66,7 +74,7 @@
             <span id="demoSiteTitle">checking</span>
           </div>
           <h2>Inject, observe, remediate</h2>
-          <p id="demoSiteText" class="muted">Select a live storefront failure, inject it into `/demo-store`, then route it through Trinetra.</p>
+          <p id="demoSiteText" class="muted">Select a live storefront failure, inject it into `/demo-store`, then route it through Trinetra. Approval is only honored when received through a Slack-signed interaction.</p>
           <div class="demo-actions">
             <label class="failure-picker" for="failureSelect">
               <span>Error type</span>
@@ -74,7 +82,7 @@
             </label>
             <button id="injectErrorButton">Inject error</button>
             <a href="/demo-store" target="_blank" rel="noreferrer">Open website</a>
-            <button id="solveWebsiteButton">Run Trinetra pipeline</button>
+            <button id="solveWebsiteButton" class="primary-action">Run Trinetra pipeline</button>
           </div>
         </article>
 
@@ -133,19 +141,20 @@
         <section class="flow-panel" aria-label="Agent architecture">
           <div class="panel-heading">
             <p class="eyebrow">Execution graph</p>
-            <span>runtime nodes</span>
+            <span id="graphStatus">waiting</span>
           </div>
-          <div class="pipeline-grid">
-            <div class="flow-layer ghost"><span>Ingest</span><small>Correlate alert context</small></div>
-            <div class="flow-layer blue"><span>Commander</span><small>Severity and route</small></div>
-            <div class="flow-layer green"><span>Specialists</span><small>Logs · metrics · traces · memory</small></div>
-            <div class="flow-layer rust"><span>Adjudicate</span><small>Weighted root cause</small></div>
-            <div class="flow-layer blue"><span>Triage</span><small>Runbook match</small></div>
-            <div class="flow-layer amber"><span>Gate</span><small>Approval policy</small></div>
-            <div class="flow-layer lime"><span>Tool agent</span><small>Safe backend tools only</small></div>
-            <div class="flow-layer rust"><span>Verify</span><small>Recover or rollback</small></div>
-            <div class="flow-layer ghost"><span>Memory</span><small>Audit and outcome</small></div>
+          <div id="agentGraph" class="pipeline-grid">
+            <button class="flow-layer inactive" type="button" data-node="ingest"><span>Alert</span><small>Correlate alert context</small></button>
+            <button class="flow-layer inactive ai" type="button" data-node="commander"><span>Commander</span><small>Severity and route</small></button>
+            <button class="flow-layer inactive tool" type="button" data-node="specialists"><span>Specialists</span><small>Logs · metrics · traces · memory</small></button>
+            <button class="flow-layer inactive ai" type="button" data-node="adjudication"><span>Negotiation</span><small>Weighted root cause</small></button>
+            <button class="flow-layer inactive ai" type="button" data-node="triage"><span>Triage</span><small>Runbook match</small></button>
+            <button class="flow-layer inactive pending" type="button" data-node="gate"><span>Approval</span><small>Human gate status</small></button>
+            <button class="flow-layer inactive ai" type="button" data-node="remediation"><span>Tool agent</span><small>Safe backend tools</small></button>
+            <button class="flow-layer inactive success" type="button" data-node="verification"><span>Verification</span><small>Recovery check</small></button>
+            <button class="flow-layer inactive audit" type="button" data-node="memory"><span>Memory</span><small>Audit and outcome</small></button>
           </div>
+          <div id="graphNodeDetails" class="graph-node-details">Select a graph node to inspect the matching runtime trace.</div>
         </section>
 
         <section class="right-stack">
@@ -178,6 +187,18 @@
             <span>runtime values only</span>
           </div>
           <div id="agentCards" class="agent-cards"></div>
+        </article>
+
+        <article class="logs-panel">
+          <div class="panel-heading">
+            <p class="eyebrow">Logs</p>
+            <span id="logStatus">waiting</span>
+          </div>
+          <div class="log-toolbar">
+            <input id="logSearch" type="search" placeholder="Filter logs" aria-label="Filter logs" />
+            <button id="refreshLogsButton" type="button">Refresh</button>
+          </div>
+          <div id="liveLogs" class="live-logs"></div>
         </article>
 
         <article class="audit-panel">
@@ -232,8 +253,16 @@
         </div>
         <div id="recentRuns" class="recent-runs"></div>
       </section>
+
+      <section class="bottom-drawer" aria-label="Prompt and response inspector">
+        <div class="panel-heading">
+          <p class="eyebrow">Prompt / Response / Raw JSON</p>
+          <span id="drawerStatus">select a Qwen call</span>
+        </div>
+        <div id="traceInspector" class="trace-inspector">Open a Qwen trace row to inspect exact prompt, response, usage, latency, and parsed output.</div>
+      </section>
     </main>
 
-    <script type="module" src="/app.js?v=20260717-runtime-trace"></script>
+    <script type="module" src="/app.js?v=20260717-enterprise-console"></script>
   </body>
 </html>

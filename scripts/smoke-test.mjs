@@ -1,7 +1,9 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 
 const port = 4197;
+const slackSigningSecret = "test-signing-secret";
 const child = spawn(process.execPath, ["backend/server.mjs"], {
   env: {
     ...process.env,
@@ -10,6 +12,8 @@ const child = spawn(process.execPath, ["backend/server.mjs"], {
     NODE_ENV: "test",
     QWEN_LIVE_CALLS: "false",
     REMEDIATION_EXECUTION_MODE: "dry-run",
+    SLACK_SIGNING_SECRET: slackSigningSecret,
+    SYNTHETIC_CHECK_INTERVAL_MS: "1000",
     RUNBOOK_ALLOWLIST: "RB-101,RB-204,RB-330,RB-401,RB-510,RB-777"
   },
   stdio: ["ignore", "pipe", "pipe"]
@@ -29,10 +33,13 @@ try {
     body: JSON.stringify({ failureId: "apiTimeout" })
   });
   const brokenSite = await requestText("/demo-store", { expectedStatus: 504 });
+  await approveIncident("website");
   const websiteAnalysis = await requestJson("/api/incidents/analyze", {
     method: "POST",
     body: JSON.stringify({ incidentKey: "website", approval: "approved", approverId: "U-HACK-JUDGE" })
   });
+  const approvals = await requestJson("/api/approvals");
+  const synthetic = await requestJson("/api/synthetic/status");
   const dryRunStatus = await requestJson("/api/demo-site/status");
   const runbooks = await requestJson("/api/runbooks");
   const alibaba = await requestJson("/api/cloud/alibaba");
@@ -50,9 +57,12 @@ try {
   assert(analysis.gate.reason, "analysis should include remediation gate reason");
   assert(failures.length >= 5, "demo storefront should expose at least five injectable failures");
   assert(brokenSite.includes("Catalog API timeout"), "demo storefront should expose selected injected error");
+  assert(approvals.signed.some((item) => item.incidentKey === "website"), "Slack-signed approval should be recorded");
   assert(websiteAnalysis.triage.runbook.id === "RB-777", "website incident should select the storefront config runbook");
+  assert(websiteAnalysis.gate.kind === "approved", "website remediation should require a real signed approval");
   assert(websiteAnalysis.verification.status.includes("dry-run mode left /demo-store unchanged"), "website remediation should stay dry-run by default");
   assert(!dryRunStatus.healthy, "demo storefront should remain broken in dry-run mode");
+  assert(synthetic.targetUrl.includes("/demo-store"), "synthetic status should expose the live target URL");
   assert(runbooks.some((book) => book.version && book.approved), "runbooks should be structured and versioned");
   assert(alibaba.provider === "Alibaba Cloud", "Alibaba deployment proof should be exposed");
   assert(realtime.qwen.readiness.length >= 6, "realtime status should include model readiness");
@@ -62,6 +72,26 @@ try {
   console.log("smoke test passed");
 } finally {
   child.kill("SIGTERM");
+}
+
+async function approveIncident(incidentKey) {
+  const payload = {
+    type: "block_actions",
+    user: { id: "U-HACK-JUDGE" },
+    actions: [{ action_id: "approve_remediation", value: incidentKey }]
+  };
+  const body = new URLSearchParams({ payload: JSON.stringify(payload) }).toString();
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = `v0=${crypto.createHmac("sha256", slackSigningSecret).update(`v0:${timestamp}:${body}`).digest("hex")}`;
+  await requestJson("/api/slack/interactions", {
+    method: "POST",
+    body,
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "x-slack-request-timestamp": timestamp,
+      "x-slack-signature": signature
+    }
+  });
 }
 
 function requestText(path, options = {}) {
@@ -105,13 +135,20 @@ async function waitForServer(portNumber) {
 
 function requestJson(path, options = {}) {
   const body = options.body || null;
+  const headers = {
+    ...(options.headers || {})
+  };
+  if (body) {
+    headers["content-type"] = headers["content-type"] || "application/json";
+    headers["content-length"] = Buffer.byteLength(body);
+  }
   return new Promise((resolve, reject) => {
     const req = http.request({
       hostname: "127.0.0.1",
       port: options.portNumber || port,
       path,
       method: options.method || "GET",
-      headers: body ? { "content-type": "application/json", "content-length": Buffer.byteLength(body) } : {}
+      headers
     }, (res) => {
       let raw = "";
       res.on("data", (chunk) => {

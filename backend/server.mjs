@@ -27,6 +27,9 @@ const deploymentMode = process.env.NODE_ENV === "production" ? "production" : "d
 const autoExecuteThreshold = Number(process.env.AUTO_EXECUTE_CONFIDENCE_THRESHOLD || 0.9);
 const approvedRunbookAllowlist = new Set((process.env.RUNBOOK_ALLOWLIST || "RB-101,RB-204,RB-330,RB-401,RB-510,RB-777").split(",").map((item) => item.trim()).filter(Boolean));
 const slackApproverAllowlist = (process.env.SLACK_APPROVER_IDS || "U-HACK-JUDGE,U-ONCALL-PRIMARY").split(",").map((item) => item.trim()).filter(Boolean);
+const slackSigningSecret = process.env.SLACK_SIGNING_SECRET || "";
+const slackApprovalChannelId = process.env.SLACK_APPROVAL_CHANNEL_ID || process.env.SLACK_CHANNEL_ID || "";
+const publicBaseUrl = process.env.PUBLIC_BASE_URL || process.env.APP_BASE_URL || "";
 const qwenApiKeyConfigured = Boolean(process.env.QWEN_API_KEY || process.env.DASHSCOPE_API_KEY);
 const qwenConfig = qwenRuntimeConfig();
 const remediationExecutionMode = process.env.REMEDIATION_EXECUTION_MODE || "dry-run";
@@ -43,7 +46,11 @@ const qwenModels = {
 };
 const dedupeWindowMs = Number(process.env.DEDUPE_WINDOW_MS || 180_000);
 const verificationTimeoutMs = Number(process.env.VERIFICATION_TIMEOUT_MS || 30_000);
+const syntheticCheckIntervalMs = Number(process.env.SYNTHETIC_CHECK_INTERVAL_MS || 10_000);
 const dedupeCache = new Map();
+const signedApprovals = new Map();
+const pendingApprovalTimers = new Map();
+const pendingApprovalTimeouts = new Map();
 const logger = createLogger({
   path: backendLogPath,
   consoleEnabled: process.env.LOG_TO_CONSOLE !== "false"
@@ -169,13 +176,24 @@ const defaultDemoConfig = Object.freeze({
 
 let desiredDemoConfig = cloneDemoConfig(defaultDemoConfig);
 let activeDemoConfig = corruptDemoConfig(cloneDemoConfig(defaultDemoConfig), "missingConfig");
+const syntheticMonitor = {
+  targetUrl: process.env.SYNTHETIC_TARGET_URL || null,
+  intervalMs: syntheticCheckIntervalMs,
+  lastCheckedAt: null,
+  status: null,
+  healthy: null,
+  latencyMs: null,
+  error: null,
+  bodyContainsFailure: null
+};
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml"
+  ".svg": "image/svg+xml",
+  ".png": "image/png"
 };
 
 class HttpError extends Error {
@@ -350,6 +368,20 @@ const runbooks = [
   }
 ];
 
+const noMatchRunbook = {
+  id: "NO_MATCH",
+  version: "runtime",
+  title: "No approved runbook matched",
+  service: "*",
+  risk: "high",
+  approved: false,
+  actionType: "none",
+  blastRadius: "unknown",
+  rollback: "No automated rollback available",
+  match: [],
+  steps: ["Escalate to human owner because no approved runbook matched the incident evidence"]
+};
+
 const agentAccuracy = {
   "Logs agent": 0.91,
   "Metrics agent": 0.87,
@@ -457,8 +489,37 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/synthetic/status") {
+      sendJson(res, 200, syntheticMonitorStatus(), requestId);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/demo-site/failures") {
       sendJson(res, 200, Object.values(demoFailures).map(({ id, label, httpStatus, symptom }) => ({ id, label, httpStatus, symptom })), requestId);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/slack/interactions") {
+      const rawBody = await readRawBody(req);
+      const approval = verifyAndRecordSlackApproval(req, rawBody, requestId);
+      sendJson(res, 200, {
+        ok: true,
+        approval,
+        message: "Signed Slack approval recorded"
+      }, requestId);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/approvals") {
+      sendJson(res, 200, {
+        signed: Array.from(signedApprovals.values()),
+        pending: Array.from(pendingApprovalTimeouts.values())
+      }, requestId);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/slack/status") {
+      sendJson(res, 200, slackApprovalStatus(), requestId);
       return;
     }
 
@@ -602,9 +663,19 @@ server.listen(port, host, () => {
     remediationExecutionMode
   }).catch(() => {});
   console.log(`Trinetra running at http://${host}:${port}`);
+  startSyntheticMonitor();
 });
 
 async function readJson(req) {
+  const raw = await readRawBody(req);
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new HttpError(400, "Invalid JSON body");
+  }
+}
+
+async function readRawBody(req) {
   let raw = "";
   let totalBytes = 0;
   for await (const chunk of req) {
@@ -612,11 +683,7 @@ async function readJson(req) {
     if (totalBytes > maxBodyBytes) throw new HttpError(413, "Request body too large");
     raw += chunk;
   }
-  try {
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    throw new HttpError(400, "Invalid JSON body");
-  }
+  return raw;
 }
 
 function sendJson(res, status, payload, requestId = crypto.randomUUID()) {
@@ -637,12 +704,307 @@ function securityHeaders(headers, requestId) {
 
 function validateAnalyzeRequest(body) {
   const incidentKey = typeof body.incidentKey === "string" ? body.incidentKey : "latency";
-  const approval = typeof body.approval === "string" ? body.approval : "pending";
-  const approverId = typeof body.approverId === "string" ? body.approverId : slackApproverAllowlist[0];
+  const requestedApproval = typeof body.approval === "string" ? body.approval : "pending";
   if (!incidents[incidentKey]) throw new HttpError(400, `Unknown incidentKey: ${incidentKey}`);
-  if (!["pending", "approved"].includes(approval)) throw new HttpError(400, `Unsupported approval state: ${approval}`);
-  if (approval === "approved" && !slackApproverAllowlist.includes(approverId)) throw new HttpError(403, `Approver is not allowlisted: ${approverId}`);
-  return { incidentKey, approval, approverId };
+  if (!["pending", "approved"].includes(requestedApproval)) throw new HttpError(400, `Unsupported approval state: ${requestedApproval}`);
+  return { incidentKey, requestedApproval };
+}
+
+function verifyAndRecordSlackApproval(req, rawBody, requestId) {
+  if (!slackSigningSecret) throw new HttpError(503, "SLACK_SIGNING_SECRET is not configured");
+  const timestamp = req.headers["x-slack-request-timestamp"];
+  const signature = req.headers["x-slack-signature"];
+  if (typeof timestamp !== "string" || typeof signature !== "string") throw new HttpError(401, "Missing Slack signature headers");
+  const ageSeconds = Math.abs(Math.floor(Date.now() / 1000) - Number(timestamp));
+  if (!Number.isFinite(ageSeconds) || ageSeconds > 300) throw new HttpError(401, "Stale Slack signature timestamp");
+  const base = `v0:${timestamp}:${rawBody}`;
+  const expected = `v0=${crypto.createHmac("sha256", slackSigningSecret).update(base).digest("hex")}`;
+  if (!safeEqual(expected, signature)) throw new HttpError(401, "Invalid Slack signature");
+
+  const payload = parseSlackPayload(rawBody, req.headers["content-type"]);
+  const action = Array.isArray(payload.actions) ? payload.actions[0] : null;
+  const incidentKey = action?.value || payload.callback_id || payload.view?.private_metadata || "website";
+  if (!incidents[incidentKey]) throw new HttpError(400, `Unknown incidentKey in Slack payload: ${incidentKey}`);
+  const approverId = payload.user?.id || payload.user?.username || "unknown";
+  if (!slackApproverAllowlist.includes(approverId)) throw new HttpError(403, `Slack approver is not allowlisted: ${approverId}`);
+  const actionId = action?.action_id || null;
+  if (actionId && actionId !== "approve_remediation") {
+    const rejected = {
+      incidentKey,
+      approverId,
+      state: "rejected",
+      source: "slack-signed",
+      rejectedAt: new Date().toISOString(),
+      requestId,
+      actionId
+    };
+    signedApprovals.set(incidentKey, rejected);
+    clearPendingApprovalTimeout(incidentKey, "rejected");
+    void logger.warn("slack_approval_rejected", rejected).catch(() => {});
+    return rejected;
+  }
+  const approval = {
+    incidentKey,
+    approverId,
+    state: "approved",
+    source: "slack-signed",
+    approvedAt: new Date().toISOString(),
+    requestId,
+    actionId
+  };
+  signedApprovals.set(incidentKey, approval);
+  clearPendingApprovalTimeout(incidentKey);
+  void logger.info("slack_approval_recorded", approval).catch(() => {});
+  return approval;
+}
+
+function parseSlackPayload(rawBody, contentType = "") {
+  if (String(contentType).includes("application/json")) {
+    try {
+      return JSON.parse(rawBody);
+    } catch {
+      throw new HttpError(400, "Invalid Slack JSON payload");
+    }
+  }
+  const params = new URLSearchParams(rawBody);
+  const payload = params.get("payload");
+  if (!payload) throw new HttpError(400, "Missing Slack payload field");
+  try {
+    return JSON.parse(payload);
+  } catch {
+    throw new HttpError(400, "Invalid Slack interactive payload JSON");
+  }
+}
+
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function resolveSignedApproval(incidentKey) {
+  const approval = signedApprovals.get(incidentKey);
+  if (!approval || approval.state !== "approved") {
+    return { approval: "pending", approverId: null, source: "none" };
+  }
+  return { approval: "approved", approverId: approval.approverId, source: approval.source, approvedAt: approval.approvedAt };
+}
+
+function slackApprovalStatus(env = process.env) {
+  const liveRequested = env.MCP_CHAT_LIVE === "true";
+  const botTokenConfigured = Boolean(env.SLACK_BOT_TOKEN);
+  const signingSecretConfigured = Boolean(slackSigningSecret);
+  const approvalChannelConfigured = Boolean(slackApprovalChannelId);
+  return {
+    liveRequested,
+    botTokenConfigured,
+    signingSecretConfigured,
+    approvalChannelConfigured,
+    approvalChannelId: approvalChannelConfigured ? slackApprovalChannelId : null,
+    interactionEndpoint: publicBaseUrl ? `${publicBaseUrl.replace(/\/$/, "")}/api/slack/interactions` : "/api/slack/interactions",
+    readyToPostApprovalRequests: liveRequested && botTokenConfigured && approvalChannelConfigured,
+    readyToVerifyInteractions: signingSecretConfigured
+  };
+}
+
+async function requestSlackApproval({ incidentKey, incident, commander, triage, gate, requestId, trace }) {
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
+  const liveRequested = process.env.MCP_CHAT_LIVE === "true";
+  const call = {
+    id: "chat",
+    name: "Slack MCP",
+    action: "request_approval",
+    status: liveRequested ? "live-requested" : "simulated",
+    request: `chat.postMessage(channel=${slackApprovalChannelId || "Not available"})`,
+    response: null,
+    result: null,
+    latencyMs: null,
+    timestamp: startedAt,
+    simulation: !liveRequested,
+    note: liveRequested ? "Live Slack approval requested" : "Simulation: MCP_CHAT_LIVE is not true"
+  };
+  trace.push(call);
+
+  if (!liveRequested) {
+    call.response = "Simulation: no live Slack connector configured";
+    call.result = call.response;
+    call.latencyMs = Date.now() - startedMs;
+    return call;
+  }
+  if (!process.env.SLACK_BOT_TOKEN) {
+    call.status = "missing-config";
+    call.response = "Missing SLACK_BOT_TOKEN";
+    call.result = call.response;
+    call.latencyMs = Date.now() - startedMs;
+    void logger.warn("slack_approval_request_not_sent", { requestId, reason: call.response }).catch(() => {});
+    return call;
+  }
+  if (!slackApprovalChannelId) {
+    call.status = "missing-config";
+    call.response = "Missing SLACK_APPROVAL_CHANNEL_ID";
+    call.result = call.response;
+    call.latencyMs = Date.now() - startedMs;
+    void logger.warn("slack_approval_request_not_sent", { requestId, reason: call.response }).catch(() => {});
+    return call;
+  }
+
+  const payload = buildSlackApprovalMessage({ incidentKey, incident, commander, triage, gate, requestId });
+  try {
+    const response = await fetch("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer ${process.env.SLACK_BOT_TOKEN}`,
+        "content-type": "application/json; charset=utf-8"
+      },
+      body: JSON.stringify(payload)
+    });
+    const body = await response.json().catch(() => ({}));
+    call.latencyMs = Date.now() - startedMs;
+    if (!response.ok || body.ok !== true) {
+      call.status = "unhealthy";
+      call.response = body.error || `Slack returned ${response.status}`;
+      call.result = call.response;
+      void logger.warn("slack_approval_request_failed", {
+        requestId,
+        incidentKey,
+        channel: slackApprovalChannelId,
+        response: call.response,
+        latencyMs: call.latencyMs
+      }).catch(() => {});
+      return call;
+    }
+    call.status = "connected";
+    call.response = {
+      ok: true,
+      channel: body.channel || slackApprovalChannelId,
+      ts: body.ts || null,
+      message: "Approval request posted to Slack"
+    };
+    call.result = call.response;
+    call.simulation = false;
+    call.note = "Live Slack approval request posted";
+    void logger.info("slack_approval_request_sent", {
+      requestId,
+      incidentKey,
+      channel: call.response.channel,
+      ts: call.response.ts,
+      latencyMs: call.latencyMs
+    }).catch(() => {});
+    return call;
+  } catch (error) {
+    call.status = "unhealthy";
+    call.response = error?.message || "Slack approval request failed";
+    call.result = call.response;
+    call.latencyMs = Date.now() - startedMs;
+    void logger.warn("slack_approval_request_failed", {
+      requestId,
+      incidentKey,
+      channel: slackApprovalChannelId,
+      response: call.response,
+      latencyMs: call.latencyMs
+    }).catch(() => {});
+    return call;
+  }
+}
+
+function buildSlackApprovalMessage({ incidentKey, incident, commander, triage, gate, requestId }) {
+  const endpointText = publicBaseUrl
+    ? `Interactive endpoint: ${publicBaseUrl.replace(/\/$/, "")}/api/slack/interactions`
+    : "Interactive endpoint: configure your Slack app Request URL to the public /api/slack/interactions endpoint.";
+  return {
+    channel: slackApprovalChannelId,
+    text: `Trinetra approval requested for ${incident.id} (${incident.service})`,
+    blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `*Trinetra approval requested*\n*Incident:* ${incident.id} - ${incident.title}\n*Service:* ${incident.service}\n*Severity:* ${commander.severity}\n*Runbook:* ${triage.runbook.id} - ${triage.runbook.title}`
+        }
+      },
+      {
+        type: "section",
+        fields: [
+          { type: "mrkdwn", text: `*Gate*\n${gate.label}` },
+          { type: "mrkdwn", text: `*Timeout*\n${Math.round(verificationTimeoutMs / 1000)} seconds` },
+          { type: "mrkdwn", text: `*Request ID*\n${requestId}` },
+          { type: "mrkdwn", text: `*Endpoint*\n${endpointText}` }
+        ]
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Approve remediation" },
+            style: "primary",
+            action_id: "approve_remediation",
+            value: incidentKey
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Escalate only" },
+            style: "danger",
+            action_id: "escalate_remediation",
+            value: incidentKey
+          }
+        ]
+      }
+    ],
+    metadata: {
+      event_type: "trinetra_approval_request",
+      event_payload: {
+        incidentKey,
+        incidentId: incident.id,
+        requestId
+      }
+    }
+  };
+}
+
+function registerPendingApprovalTimeout(incidentKey, incident, gate, requestId) {
+  clearPendingApprovalTimeout(incidentKey);
+  const expiresAtMs = Date.now() + verificationTimeoutMs;
+  const record = {
+    incidentKey,
+    incidentId: incident.id,
+    service: incident.service,
+    runbookId: gate.runbook?.id || null,
+    requestId,
+    state: "pending",
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    timeoutMs: verificationTimeoutMs
+  };
+  pendingApprovalTimeouts.set(incidentKey, record);
+  const timer = setTimeout(() => {
+    const current = pendingApprovalTimeouts.get(incidentKey);
+    if (!current || current.state !== "pending") return;
+    current.state = "timed_out";
+    current.escalatedAt = new Date().toISOString();
+    current.escalation = "Escalated to on-call after approval timeout";
+    pendingApprovalTimeouts.set(incidentKey, current);
+    pendingApprovalTimers.delete(incidentKey);
+    void logger.warn("approval_timeout_escalated", current).catch(() => {});
+  }, verificationTimeoutMs);
+  timer.unref?.();
+  pendingApprovalTimers.set(incidentKey, timer);
+  void logger.info("approval_timeout_scheduled", record).catch(() => {});
+}
+
+function clearPendingApprovalTimeout(incidentKey, state = "approved") {
+  const timer = pendingApprovalTimers.get(incidentKey);
+  if (timer) clearTimeout(timer);
+  pendingApprovalTimers.delete(incidentKey);
+  const current = pendingApprovalTimeouts.get(incidentKey);
+  if (current?.state === "pending") {
+    pendingApprovalTimeouts.set(incidentKey, {
+      ...current,
+      state,
+      resolvedAt: new Date().toISOString()
+    });
+  }
 }
 
 function currentDemoFailure() {
@@ -651,21 +1013,36 @@ function currentDemoFailure() {
 
 function buildWebsiteIncident() {
   const failure = currentDemoFailure();
+  const synthetic = syntheticMonitorStatus();
+  const syntheticStatus = synthetic.status ?? failure.metrics.syntheticStatus;
+  const syntheticLog = synthetic.lastCheckedAt
+    ? `${synthetic.lastCheckedAt} synthetic-check ${synthetic.healthy ? "ok" : "error"} GET /demo-store returned ${syntheticStatus ?? "unknown"} in ${synthetic.latencyMs ?? "unknown"}ms`
+    : "synthetic-check not available: no live probe has completed yet";
   return {
     ...incidents.website,
     title: `Trinetra demo storefront: ${failure.label}`,
     alert: `Synthetic check /demo-store detected ${failure.label.toLowerCase()}`,
     customerImpact: failure.symptom,
-    logs: failure.logs.map((line, index) => `2026-07-13T09:0${index}:1${index}Z ${line}`),
+    logs: [
+      syntheticLog,
+      ...failure.logs.map((line, index) => `2026-07-13T09:0${index}:1${index}Z ${line}`)
+    ],
     metrics: {
       ...failure.metrics,
+      syntheticStatus,
+      syntheticLatencyMs: synthetic.latencyMs,
+      syntheticHealthy: synthetic.healthy,
       affectedRegions: ["local-demo"]
     },
+    syntheticCheck: synthetic,
     demoFailure: failure
   };
 }
 
-async function orchestrateIncident({ incidentKey = "latency", approval = "pending", approverId = slackApproverAllowlist[0] }, requestId = crypto.randomUUID()) {
+async function orchestrateIncident({ incidentKey = "latency", requestedApproval = "pending" }, requestId = crypto.randomUUID()) {
+  const approvalState = resolveSignedApproval(incidentKey);
+  const approval = approvalState.approval;
+  const approverId = approvalState.approverId;
   const incident = incidentKey === "website" ? buildWebsiteIncident() : incidents[incidentKey] || incidents.latency;
   const runStartedAt = new Date().toISOString();
   const audit = [];
@@ -761,8 +1138,21 @@ async function orchestrateIncident({ incidentKey = "latency", approval = "pendin
   });
 
   const gate = chooseGate(commander, runbook, triage, approval, approverId);
+  let approvalMcp = null;
+  if (gate.kind === "human") {
+    registerPendingApprovalTimeout(incidentKey, incident, gate, requestId);
+    approvalMcp = await requestSlackApproval({
+      incidentKey,
+      incident,
+      commander,
+      triage,
+      gate,
+      requestId,
+      trace: mcpTrace
+    });
+  }
   logCall(audit, "Remediation gate", {
-    input: `${commander.severity}, ${runbook.risk} risk, approval=${approval}`,
+    input: `${commander.severity}, ${runbook.risk} risk, requestedApproval=${requestedApproval}, signedApproval=${approval}`,
     output: gate.label,
     confidence: gate.confidence,
     cost: 0.004,
@@ -770,7 +1160,7 @@ async function orchestrateIncident({ incidentKey = "latency", approval = "pendin
     tokens: tokenUsage(gate.reason, gate.label),
     branch: gate.kind,
     reasoning: gate.reason,
-    mcp: useMcp(mcpTrace, gate.kind === "auto" || gate.kind === "approved" ? "deploy" : "chat", gate.kind === "auto" || gate.kind === "approved" ? gate.deployAction : "request_approval", gate.action)
+    mcp: approvalMcp || useMcp(mcpTrace, gate.kind === "auto" || gate.kind === "approved" ? "deploy" : "chat", gate.kind === "auto" || gate.kind === "approved" ? gate.deployAction : "request_approval", gate.action)
   });
 
   const remediationPlan = await runRemediationAgent(incident, triage, gate, specialists);
@@ -1217,9 +1607,74 @@ async function realtimeStatus(requestId) {
       status: remediationExecutionMode || null
     },
     mcps,
+    synthetic: syntheticMonitorStatus(),
+    slack: slackApprovalStatus(),
     latestRun: latest,
     liveEvents: buildRealtimeEvents(latest)
   };
+}
+
+function syntheticMonitorStatus() {
+  return {
+    ...syntheticMonitor,
+    targetUrl: syntheticTargetUrl()
+  };
+}
+
+function syntheticTargetUrl() {
+  if (syntheticMonitor.targetUrl) return syntheticMonitor.targetUrl;
+  const connectHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+  return `http://${connectHost}:${port}/demo-store`;
+}
+
+function startSyntheticMonitor() {
+  const run = () => {
+    void runSyntheticCheck().catch((error) => {
+      void logger.warn("synthetic_check_error", {
+        targetUrl: syntheticTargetUrl(),
+        message: error?.message || "Synthetic check failed"
+      }).catch(() => {});
+    });
+  };
+  setTimeout(run, 250).unref?.();
+  const interval = setInterval(run, syntheticCheckIntervalMs);
+  interval.unref?.();
+}
+
+async function runSyntheticCheck() {
+  const targetUrl = syntheticTargetUrl();
+  const checkedAt = new Date().toISOString();
+  const started = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(targetUrl, {
+      method: "GET",
+      headers: { "x-trinetra-synthetic": "true" },
+      signal: controller.signal
+    });
+    const body = await response.text();
+    const bodyContainsFailure = body.includes("Synthetic check failed") || body.includes("Demo Store - Error");
+    syntheticMonitor.targetUrl = targetUrl;
+    syntheticMonitor.lastCheckedAt = checkedAt;
+    syntheticMonitor.status = response.status;
+    syntheticMonitor.healthy = response.status === 200 && !bodyContainsFailure;
+    syntheticMonitor.latencyMs = Date.now() - started;
+    syntheticMonitor.error = null;
+    syntheticMonitor.bodyContainsFailure = bodyContainsFailure;
+    void logger.info("synthetic_check_completed", syntheticMonitorStatus()).catch(() => {});
+  } catch (error) {
+    syntheticMonitor.targetUrl = targetUrl;
+    syntheticMonitor.lastCheckedAt = checkedAt;
+    syntheticMonitor.status = null;
+    syntheticMonitor.healthy = false;
+    syntheticMonitor.latencyMs = Date.now() - started;
+    syntheticMonitor.error = error?.name === "AbortError" ? "Synthetic check timed out" : error?.message || "Synthetic check failed";
+    syntheticMonitor.bodyContainsFailure = null;
+    void logger.warn("synthetic_check_completed", syntheticMonitorStatus()).catch(() => {});
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function buildMcpStatus() {
@@ -1381,10 +1836,11 @@ function normalizeHypothesis(finding) {
 
 function selectRunbook(incident, adjudication) {
   const corpus = `${incident.alert} ${incident.logs.join(" ")} ${adjudication.rootCause}`.toLowerCase();
-  return runbooks.find((book) => (book.service === incident.service || book.service === "*") && book.match.some((term) => corpus.includes(term))) || runbooks[0];
+  return runbooks.find((book) => (book.service === incident.service || book.service === "*") && book.match.some((term) => corpus.includes(term))) || noMatchRunbook;
 }
 
 async function runTriageAgent(incident, adjudication, commander, fallbackRunbook) {
+  const runbookCatalog = [...runbooks, noMatchRunbook];
   const fallback = {
     rootCause: adjudication.rootCause,
     confidence: adjudication.confidence,
@@ -1396,9 +1852,9 @@ async function runTriageAgent(incident, adjudication, commander, fallbackRunbook
     incident,
     adjudication,
     commander,
-    runbooks: runbooks.map(({ id, title, service, risk, actionType, match, steps }) => ({ id, title, service, risk, actionType, match, steps }))
+    runbooks: runbookCatalog.map(({ id, title, service, risk, actionType, match, steps }) => ({ id, title, service, risk, actionType, match, steps }))
   }, () => fallback);
-  const selected = runbooks.find((book) => book.id === result.matchedRunbookId) || fallbackRunbook;
+  const selected = runbookCatalog.find((book) => book.id === result.matchedRunbookId) || fallbackRunbook || noMatchRunbook;
   return {
     rootCause: String(result.rootCause || fallback.rootCause),
     confidence: normalizeConfidence(result.confidence, fallback.confidence),

@@ -5,6 +5,8 @@ const els = {
   realtimePanel: document.querySelector("#realtimePanel"),
   realtimeGeneratedAt: document.querySelector("#realtimeGeneratedAt"),
   realtimeEvents: document.querySelector("#realtimeEvents"),
+  headerIncident: document.querySelector("#headerIncident"),
+  headerStatus: document.querySelector("#headerStatus"),
   qwenReadiness: document.querySelector("#qwenReadiness"),
   modelReadiness: document.querySelector("#modelReadiness"),
   mcpReadiness: document.querySelector("#mcpReadiness"),
@@ -41,15 +43,27 @@ const els = {
   remediationTimeline: document.querySelector("#remediationTimeline"),
   agentCards: document.querySelector("#agentCards"),
   auditRows: document.querySelector("#auditRows"),
+  agentGraph: document.querySelector("#agentGraph"),
+  graphStatus: document.querySelector("#graphStatus"),
+  graphNodeDetails: document.querySelector("#graphNodeDetails"),
   mcpGrid: document.querySelector("#mcpGrid"),
   mcpTrace: document.querySelector("#mcpTrace"),
   executionTimeline: document.querySelector("#executionTimeline"),
   qwenTrace: document.querySelector("#qwenTrace"),
-  recentRuns: document.querySelector("#recentRuns")
+  recentRuns: document.querySelector("#recentRuns"),
+  liveLogs: document.querySelector("#liveLogs"),
+  logSearch: document.querySelector("#logSearch"),
+  logStatus: document.querySelector("#logStatus"),
+  refreshLogsButton: document.querySelector("#refreshLogsButton"),
+  traceInspector: document.querySelector("#traceInspector"),
+  drawerStatus: document.querySelector("#drawerStatus")
 };
 
 let currentMode = "demo";
 let realtimeTimer = null;
+let logTimer = null;
+let lastRunData = null;
+let currentLogs = [];
 
 els.demoModeButton.addEventListener("click", () => setMode("demo"));
 els.realtimeModeButton.addEventListener("click", () => setMode("realtime"));
@@ -58,11 +72,19 @@ els.incidentSelect.addEventListener("change", runAgents);
 els.approvalSelect.addEventListener("change", runAgents);
 els.injectErrorButton.addEventListener("click", injectDemoError);
 els.solveWebsiteButton.addEventListener("click", solveWebsiteIncident);
+els.refreshLogsButton.addEventListener("click", refreshLogs);
+els.logSearch.addEventListener("input", () => renderLogs(currentLogs));
+els.agentGraph.addEventListener("click", (event) => {
+  const node = event.target.closest("[data-node]");
+  if (node) inspectGraphNode(node.dataset.node);
+});
 
 loadFailureOptions();
 runAgents();
 refreshOpsStatus();
 refreshDemoSiteStatus();
+refreshLogs();
+logTimer = setInterval(refreshLogs, 6000);
 
 function setMode(mode) {
   currentMode = mode;
@@ -87,35 +109,41 @@ function setMode(mode) {
 async function runAgents() {
   setLoading(true);
   try {
-    render(await fetchJson("/api/incidents/analyze", {
+    renderLoadingTrace();
+    const data = await fetchJson("/api/incidents/analyze", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         incidentKey: els.incidentSelect.value,
         approval: els.approvalSelect.value
       })
-    }));
+    });
+    render(data);
   } catch (error) {
     console.error(error);
     els.rootCause.textContent = "Could not run incident agents";
     els.confidenceText.textContent = "Check the local server and try again.";
+    els.headerStatus.textContent = "offline";
   } finally {
     setLoading(false);
+    refreshLogs();
   }
 }
 
 function render(data) {
+  lastRunData = data;
   const { incident, commander, specialists, adjudication, triage, remediationPlan, gate, verification, audit, totals, mcps, mcpTrace, executionTimeline, qwenTrace, runId, requestId, mode, route, qwen } = data;
   els.modeText.textContent = mode;
+  els.headerIncident.textContent = incident?.id || "Not available";
   els.runIdText.textContent = runId;
   els.requestIdText.textContent = requestId;
   els.routeText.textContent = route?.name || "--";
-  els.callCount.textContent = totals.calls;
+  animateNumber(els.callCount, totals.calls);
   els.avgConfidence.textContent = formatPercent(totals.confidence);
-  els.runCost.textContent = formatCost(totals.cost);
+  els.runCost.textContent = formatTokens(totalUsage(qwenTrace));
 
   els.severityBadge.textContent = commander.severity;
-  els.severityBadge.className = commander.severity === "P1" ? "hot" : "warm";
+  els.severityBadge.className = commander.severity === "P1" ? "status-pill error" : "status-pill warning";
   els.incidentTitle.textContent = `${incident.id}: ${incident.title}`;
   els.incidentAlert.textContent = incident.alert;
   els.serviceName.textContent = incident.service;
@@ -128,26 +156,39 @@ function render(data) {
   els.gateLabel.textContent = gate.label;
   els.gateAction.textContent = `${gate.action}. Reason: ${gate.reason}. Risk: ${triage.runbook.risk}. Steps: ${triage.runbook.steps.join(" -> ")}.`;
   els.verificationStatus.textContent = verification.status;
+  els.headerStatus.textContent = verification.status || gate.label || "Not available";
   renderMetricDelta(incident.metrics, verification.after);
-  renderRemediationTimeline(remediationPlan);
+  renderRemediationTimeline(remediationPlan, true);
   renderAgents(specialists);
   renderAudit(audit);
-  renderExecutionTimeline(executionTimeline || []);
+  renderExecutionTimeline(executionTimeline || [], true);
   renderQwenTrace(qwenTrace || []);
   renderMcps(mcps);
   renderMcpTrace(mcpTrace);
+  renderExecutionGraph(data);
   refreshRecentRuns();
 }
 
-function renderRemediationTimeline(remediationPlan = {}) {
+function renderLoadingTrace() {
+  const loading = document.createElement("article");
+  loading.className = "trace-empty thinking";
+  loading.innerHTML = `<span>Thinking</span><i></i><i></i><i></i>`;
+  els.qwenTrace.replaceChildren(loading.cloneNode(true));
+  els.executionTimeline.replaceChildren(loading);
+  els.traceInspector.textContent = "Waiting for runtime response from the backend.";
+  els.drawerStatus.textContent = "running";
+}
+
+function renderRemediationTimeline(remediationPlan = {}, animate = false) {
   const timeline = remediationPlan.timeline || [];
   if (!timeline.length) {
     els.remediationTimeline.replaceChildren(emptyTimelineRow("Waiting for remediation agent"));
     return;
   }
-  els.remediationTimeline.replaceChildren(...timeline.slice(-10).map((event) => {
+  const rows = timeline.slice(-12).map((event, index) => {
     const row = document.createElement("article");
-    row.className = `tool-step ${event.status || "pending"}`;
+    row.className = `tool-step ${statusClass(event.status)} ${animate ? "will-enter" : ""}`;
+    row.style.setProperty("--delay", `${index * 65}ms`);
     row.innerHTML = `
       <span>${statusMark(event.status)}</span>
       <div>
@@ -156,7 +197,9 @@ function renderRemediationTimeline(remediationPlan = {}) {
       </div>
     `;
     return row;
-  }));
+  });
+  els.remediationTimeline.replaceChildren(...rows);
+  requestAnimationFrame(() => rows.forEach((row) => row.classList.remove("will-enter")));
 }
 
 function emptyTimelineRow(text) {
@@ -173,6 +216,13 @@ function statusMark(status) {
   return "•";
 }
 
+function statusClass(status) {
+  if (status === "completed" || status === "healthy" || status === "success") return "success";
+  if (status === "attention" || status === "blocked" || status === "failed" || status === "error") return "error";
+  if (status === "selected" || status === "reasoning" || status === "pending") return "pending";
+  return "inactive";
+}
+
 async function refreshOpsStatus() {
   const [health, readiness] = await Promise.allSettled([
     fetchJson("/api/health"),
@@ -180,9 +230,11 @@ async function refreshOpsStatus() {
   ]);
   if (health.status === "fulfilled") {
     els.healthText.textContent = health.value.ok ? "healthy" : "degraded";
+    els.headerStatus.textContent = health.value.ok ? "healthy" : "degraded";
     els.modeText.textContent = health.value.mode;
   } else {
     els.healthText.textContent = "offline";
+    els.headerStatus.textContent = "offline";
   }
   if (readiness.status === "fulfilled") {
     els.readinessText.textContent = readiness.value.ready ? "ready" : "not ready";
@@ -198,11 +250,13 @@ async function refreshDemoSiteStatus() {
       els.failureSelect.value = status.failureId;
     }
     els.demoSiteTitle.textContent = `Storefront status: ${status.healthy ? "healthy" : "broken"}`;
+    els.demoSiteTitle.className = status.healthy ? "status-pill success" : "status-pill error";
     els.demoSiteText.textContent = status.healthy
       ? `Recovered from ${status.failureLabel}. /demo-store returns ${status.httpStatus}. Pipeline action: ${status.lastAction || "not yet"}.`
       : `${status.failureLabel} active. /demo-store returns ${status.httpStatus}: ${status.error}. ${status.symptom}`;
   } catch {
     els.demoSiteTitle.textContent = "Storefront status: unknown";
+    els.demoSiteTitle.className = "status-pill inactive";
   }
 }
 
@@ -234,7 +288,7 @@ async function injectDemoError() {
 
 async function solveWebsiteIncident() {
   els.incidentSelect.value = "website";
-  els.approvalSelect.value = "approved";
+  els.approvalSelect.value = "pending";
   await runAgents();
   await refreshDemoSiteStatus();
 }
@@ -263,9 +317,29 @@ function renderRealtimeStatus(status) {
     ? "live Qwen calls enabled"
     : status.qwen.apiKeyConfigured ? "Qwen shadow mode" : "local fallback";
 
-  els.realtimeEvents.replaceChildren(...status.liveEvents.map((event) => {
+  const syntheticEvent = {
+    stage: "Synthetic uptime check",
+    status: status.synthetic?.healthy === null || status.synthetic?.healthy === undefined
+      ? "Not available"
+      : status.synthetic.healthy ? "healthy" : "unhealthy",
+    text: status.synthetic?.lastCheckedAt
+      ? `${status.synthetic.targetUrl || "Not available"} returned ${status.synthetic.status ?? "Not available"} in ${status.synthetic.latencyMs ?? "Not available"}ms`
+      : "No live synthetic probe has completed yet.",
+    timestamp: status.synthetic?.lastCheckedAt || null
+  };
+  const slackEvent = {
+    stage: "Slack approval",
+    status: status.slack?.readyToPostApprovalRequests ? "ready" : "not ready",
+    text: status.slack?.readyToPostApprovalRequests
+      ? `Posting approval requests to ${status.slack.approvalChannelId}`
+      : status.slack?.approvalChannelConfigured === false
+        ? "Missing SLACK_APPROVAL_CHANNEL_ID; approval requests are not posted to Slack."
+        : "Not available",
+    timestamp: status.generatedAt || null
+  };
+  els.realtimeEvents.replaceChildren(...[syntheticEvent, slackEvent, ...status.liveEvents].map((event) => {
     const row = document.createElement("article");
-    row.className = "realtime-event";
+    row.className = `realtime-event ${statusClass(event.status)}`;
     row.innerHTML = `
       <span>${escapeHtml(event.stage)}</span>
       <strong>${escapeHtml(event.status)}</strong>
@@ -276,7 +350,7 @@ function renderRealtimeStatus(status) {
 
   els.modelReadiness.replaceChildren(...status.qwen.readiness.map((model) => {
     const card = document.createElement("article");
-    card.className = "readiness-card";
+    card.className = `readiness-card ${statusClass(model.status)}`;
     card.innerHTML = `
       <strong>${escapeHtml(model.role)}</strong>
       <span>${escapeHtml(model.model)}</span>
@@ -287,7 +361,7 @@ function renderRealtimeStatus(status) {
 
   els.mcpReadiness.replaceChildren(...status.mcps.map((mcp) => {
     const card = document.createElement("article");
-    card.className = "readiness-card";
+    card.className = `readiness-card ${statusClass(mcp.status)}`;
     card.innerHTML = `
       <strong>${escapeHtml(mcp.name)}</strong>
       <span>${escapeHtml(mcp.category)}</span>
@@ -333,11 +407,11 @@ function xhrJson(url, options = {}) {
 function renderAgents(specialists) {
   els.agentCards.replaceChildren(...specialists.map((agent) => {
     const card = document.createElement("article");
-    card.className = "agent-card";
+    card.className = `agent-card ${agent.agent?.toLowerCase?.().includes("qwen") ? "ai" : ""}`;
     card.innerHTML = `
       <div>
         <h3>${escapeHtml(valueOrNA(agent.agent))}</h3>
-        <span>${formatPercent(agent.confidence)}</span>
+        <span class="metric-chip">${formatPercent(agent.confidence)}</span>
       </div>
       <p>${escapeHtml(valueOrNA(agent.finding))}</p>
       <em>${escapeHtml(valueOrNA(agent.mcp?.name))} · ${escapeHtml(valueOrNA(agent.mcp?.action))}</em>
@@ -367,14 +441,15 @@ function renderAudit(audit) {
   }));
 }
 
-function renderExecutionTimeline(events = []) {
+function renderExecutionTimeline(events = [], animate = false) {
   if (!events.length) {
     els.executionTimeline.replaceChildren(emptyTrace("No execution timeline available"));
     return;
   }
-  els.executionTimeline.replaceChildren(...events.map((event) => {
+  const rows = events.map((event, index) => {
     const details = document.createElement("details");
-    details.className = "trace-item";
+    details.className = `trace-item ${animate ? "will-enter" : ""}`;
+    details.style.setProperty("--delay", `${Math.min(index, 24) * 45}ms`);
     details.innerHTML = `
       <summary>
         <span>${escapeHtml(formatTime(event.timestamp))}</span>
@@ -384,7 +459,9 @@ function renderExecutionTimeline(events = []) {
       <pre>${escapeHtml(JSON.stringify(event, null, 2))}</pre>
     `;
     return details;
-  }));
+  });
+  els.executionTimeline.replaceChildren(...rows);
+  requestAnimationFrame(() => rows.forEach((row) => row.classList.remove("will-enter")));
 }
 
 function renderQwenTrace(trace = []) {
@@ -394,13 +471,21 @@ function renderQwenTrace(trace = []) {
   }
   els.qwenTrace.replaceChildren(...trace.map((call) => {
     const details = document.createElement("details");
-    details.className = "trace-item";
+    details.className = "trace-item qwen-call";
+    details.addEventListener("toggle", () => {
+      if (details.open) inspectQwenCall(call);
+    });
     details.innerHTML = `
       <summary>
         <span>${escapeHtml(formatTime(call.timestamp))}</span>
         <strong>${escapeHtml(valueOrNA(call.agent || call.role))}</strong>
         <em>${escapeHtml(valueOrNA(call.model))} · ${escapeHtml(formatLatency(call.latencyMs))} · ${escapeHtml(formatTokens(call.usage))}</em>
       </summary>
+      <div class="trace-actions">
+        <button type="button" data-copy="system">Copy system</button>
+        <button type="button" data-copy="user">Copy user</button>
+        <button type="button" data-copy="raw">Copy raw</button>
+      </div>
       <section class="trace-block"><h3>System Prompt</h3><pre>${escapeHtml(valueOrNA(call.systemPrompt))}</pre></section>
       <section class="trace-block"><h3>User Prompt</h3><pre>${escapeHtml(valueOrNA(call.userPrompt))}</pre></section>
       <section class="trace-block"><h3>Raw Response</h3><pre>${escapeHtml(valueOrNA(call.rawResponse))}</pre></section>
@@ -414,8 +499,19 @@ function renderQwenTrace(trace = []) {
         error: call.error ?? null
       }, null, 2))}</pre></section>
     `;
+    details.querySelectorAll("[data-copy]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const type = button.dataset.copy;
+        const text = type === "system" ? call.systemPrompt : type === "user" ? call.userPrompt : call.rawResponse;
+        navigator.clipboard?.writeText(valueOrNA(text));
+        button.textContent = "Copied";
+        setTimeout(() => { button.textContent = `Copy ${type}`; }, 1200);
+      });
+    });
     return details;
   }));
+  if (trace[0]) inspectQwenCall(trace[0]);
 }
 
 function emptyTrace(text) {
@@ -425,10 +521,87 @@ function emptyTrace(text) {
   return article;
 }
 
+function inspectQwenCall(call) {
+  els.drawerStatus.textContent = `${valueOrNA(call.agent || call.role)} · ${valueOrNA(call.model)}`;
+  els.traceInspector.innerHTML = `
+    <div class="inspector-grid">
+      <div><span>Latency</span><strong>${escapeHtml(formatLatency(call.latencyMs))}</strong></div>
+      <div><span>Tokens</span><strong>${escapeHtml(formatTokens(call.usage))}</strong></div>
+      <div><span>Finish reason</span><strong>${escapeHtml(valueOrNA(call.finishReason))}</strong></div>
+      <div><span>Timestamp</span><strong>${escapeHtml(formatTime(call.timestamp))}</strong></div>
+    </div>
+    <section><h3>System Prompt</h3><pre>${escapeHtml(valueOrNA(call.systemPrompt))}</pre></section>
+    <section><h3>User Prompt</h3><pre>${escapeHtml(valueOrNA(call.userPrompt))}</pre></section>
+    <section><h3>Raw Response</h3><pre>${escapeHtml(valueOrNA(call.rawResponse))}</pre></section>
+    <section><h3>Parsed Response</h3><pre>${escapeHtml(JSON.stringify(call.parsedResponse ?? null, null, 2))}</pre></section>
+  `;
+}
+
+function inspectGraphNode(node) {
+  const data = lastRunData;
+  if (!data) {
+    els.graphNodeDetails.textContent = "No runtime execution is available yet.";
+    return;
+  }
+  const matching = nodeEvents(data, node);
+  els.agentGraph.querySelectorAll("[data-node]").forEach((el) => {
+    el.classList.toggle("selected", el.dataset.node === node);
+  });
+  els.graphNodeDetails.innerHTML = `
+    <strong>${escapeHtml(labelFor(node))}</strong>
+    <span>${matching.length ? `${matching.length} runtime entries` : "Not available"}</span>
+    <pre>${escapeHtml(JSON.stringify(matching.slice(0, 4), null, 2))}</pre>
+  `;
+}
+
+function renderExecutionGraph(data) {
+  const nodeOrder = ["ingest", "commander", "specialists", "adjudication", "triage", "gate", "remediation", "verification", "memory"];
+  const activeIndex = nodeOrder.findLastIndex((node) => nodeEvents(data, node).length > 0);
+  els.graphStatus.textContent = activeIndex >= 0 ? "runtime mapped" : "Not available";
+  els.agentGraph.querySelectorAll("[data-node]").forEach((nodeEl, index) => {
+    const node = nodeEl.dataset.node;
+    const events = nodeEvents(data, node);
+    nodeEl.classList.remove("completed", "current", "future", "inactive", "failed");
+    if (events.some((event) => /fail|error|unhealthy|blocked|escalate/i.test(JSON.stringify(event)))) {
+      nodeEl.classList.add("failed");
+    } else if (events.length) {
+      nodeEl.classList.add(index === activeIndex ? "current" : "completed");
+    } else if (activeIndex >= 0 && index > activeIndex) {
+      nodeEl.classList.add("future");
+    } else {
+      nodeEl.classList.add("inactive");
+    }
+  });
+  inspectGraphNode(nodeOrder[Math.max(activeIndex, 0)]);
+}
+
+function nodeEvents(data, node) {
+  const timeline = data.executionTimeline || [];
+  const qwenTrace = data.qwenTrace || [];
+  const remediationTimeline = data.remediationPlan?.timeline || [];
+  const audit = data.audit || [];
+  const matchers = {
+    ingest: (event) => /alert|incident|ingest/i.test(`${event.label || ""} ${event.type || ""}`),
+    commander: (event) => /commander/i.test(`${event.label || ""} ${event.agent || ""}`),
+    specialists: (event) => /logs|metrics|trace|memory|specialist/i.test(`${event.label || ""} ${event.agent || ""}`),
+    adjudication: (event) => /adjudicat|negotiat|winner/i.test(`${event.label || ""} ${event.type || ""}`),
+    triage: (event) => /triage|runbook/i.test(`${event.label || ""} ${event.agent || ""}`),
+    gate: (event) => /gate|approval|slack/i.test(`${event.label || ""} ${event.type || ""}`),
+    remediation: (event) => /remediation|tool|restore|restart|verify/i.test(`${event.label || ""} ${event.type || ""}`),
+    verification: (event) => /verification|verify/i.test(`${event.label || ""} ${event.type || ""}`),
+    memory: (event) => /memory|audit|persist/i.test(`${event.label || ""} ${event.type || ""}`)
+  };
+  const matcher = matchers[node] || (() => false);
+  const source = [...timeline, ...qwenTrace, ...remediationTimeline, ...audit];
+  if (node === "gate" && data.gate) source.push(data.gate);
+  if (node === "verification" && data.verification) source.push(data.verification);
+  return source.filter(matcher);
+}
+
 function renderMcps(mcps = []) {
   els.mcpGrid.replaceChildren(...mcps.map((mcp) => {
     const card = document.createElement("article");
-    card.className = "mcp-card";
+    card.className = `mcp-card ${statusClass(mcp.status)}`;
     card.innerHTML = `
       <div>
         <strong>${escapeHtml(mcp.name)}</strong>
@@ -443,9 +616,13 @@ function renderMcps(mcps = []) {
 }
 
 function renderMcpTrace(trace = []) {
+  if (!trace.length) {
+    els.mcpTrace.replaceChildren(emptyTrace("No MCP activity available"));
+    return;
+  }
   els.mcpTrace.replaceChildren(...trace.map((call, index) => {
     const row = document.createElement("article");
-    row.className = "mcp-trace-row";
+    row.className = `mcp-trace-row ${statusClass(call.status)}`;
     row.innerHTML = `
       <span>${String(index + 1).padStart(2, "0")}</span>
       <div>
@@ -466,7 +643,44 @@ function renderRecentRuns(runs = []) {
       <strong>${escapeHtml(run.runId)} · ${escapeHtml(run.incidentId)} · ${escapeHtml(run.severity)}</strong>
       <span>${escapeHtml(run.service)} / ${escapeHtml(run.route?.name || "route")} / ${escapeHtml(run.gate)} / ${escapeHtml(run.verification)}</span>
       <span>${escapeHtml(run.adjudication?.rootCause || "no root cause")} · ${escapeHtml(run.gateReason || "no gate reason")}</span>
-      <small>${escapeHtml(run.startedAt)} · ${run.totals.calls} calls · cost ${escapeHtml(formatCost(run.totals.cost))}</small>
+      <small>${escapeHtml(run.startedAt)} · ${run.totals.calls} calls · ${escapeHtml(formatTokens(run.totals.usage || null))}</small>
+    `;
+    return row;
+  }));
+}
+
+async function refreshLogs() {
+  try {
+    const logs = await fetchJson("/api/logs?limit=160");
+    currentLogs = Array.isArray(logs) ? logs : [];
+    els.logStatus.textContent = currentLogs.length ? `${currentLogs.length} entries` : "Not available";
+    renderLogs(currentLogs);
+  } catch (error) {
+    console.warn(error);
+    els.logStatus.textContent = "offline";
+    els.liveLogs.replaceChildren(emptyTrace("Log endpoint is not available"));
+  }
+}
+
+function renderLogs(logs = []) {
+  const query = els.logSearch.value.trim().toLowerCase();
+  const filtered = logs.filter((entry) => {
+    if (!query) return true;
+    return JSON.stringify(entry).toLowerCase().includes(query);
+  }).slice(0, 80);
+  if (!filtered.length) {
+    els.liveLogs.replaceChildren(emptyTrace("No log entries match the current filter"));
+    return;
+  }
+  els.liveLogs.replaceChildren(...filtered.map((entry) => {
+    const row = document.createElement("article");
+    const level = String(entry.level || entry.severity || "info").toLowerCase();
+    row.className = `log-row ${level}`;
+    row.innerHTML = `
+      <span>${escapeHtml(formatTime(entry.ts || entry.timestamp || entry.time))}</span>
+      <strong>${escapeHtml(level.toUpperCase())}</strong>
+      <code>${escapeHtml(entry.event || entry.message || "Not available")}</code>
+      <pre>${escapeHtml(JSON.stringify(entry, null, 2))}</pre>
     `;
     return row;
   }));
@@ -516,6 +730,20 @@ function formatTokens(tokens) {
   return `${total} tokens`;
 }
 
+function totalUsage(trace = []) {
+  const usage = trace.reduce((acc, call) => {
+    const item = call.usage || {};
+    const prompt = item.prompt_tokens ?? item.prompt ?? 0;
+    const completion = item.completion_tokens ?? item.completion ?? 0;
+    const total = item.total_tokens ?? item.total ?? prompt + completion;
+    if (typeof prompt === "number") acc.prompt_tokens += prompt;
+    if (typeof completion === "number") acc.completion_tokens += completion;
+    if (typeof total === "number") acc.total_tokens += total;
+    return acc;
+  }, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  return usage.total_tokens ? usage : null;
+}
+
 function formatTime(timestamp) {
   if (!timestamp) return "Not available";
   const date = new Date(timestamp);
@@ -529,11 +757,36 @@ function labelFor(key) {
 
 function setLoading(isLoading) {
   els.runButton.disabled = isLoading;
+  els.solveWebsiteButton.disabled = isLoading;
   if (isLoading) {
     els.runButton.textContent = currentMode === "realtime" ? "Probing..." : "Running...";
+    els.solveWebsiteButton.textContent = "Running...";
   } else {
     els.runButton.textContent = currentMode === "realtime" ? "Run realtime probe" : "Run demo pipeline";
+    els.solveWebsiteButton.textContent = "Run Trinetra pipeline";
   }
+}
+
+function animateNumber(element, value) {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    element.textContent = "Not available";
+    return;
+  }
+  const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (prefersReducedMotion) {
+    element.textContent = String(value);
+    return;
+  }
+  const start = Number(element.textContent) || 0;
+  const duration = 450;
+  const started = performance.now();
+  function step(now) {
+    const progress = Math.min(1, (now - started) / duration);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    element.textContent = String(Math.round(start + (value - start) * eased));
+    if (progress < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
 }
 
 function escapeHtml(value) {
