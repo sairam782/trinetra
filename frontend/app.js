@@ -70,6 +70,7 @@ let lastRunData = null;
 let currentLogs = [];
 let liveTimelineEvents = [];
 let activeQwen = null;
+const initialIncidentKey = new URLSearchParams(window.location.search).get("incident");
 
 els.demoModeButton.addEventListener("click", () => setMode("demo"));
 els.realtimeModeButton.addEventListener("click", () => setMode("realtime"));
@@ -86,6 +87,10 @@ els.agentGraph.addEventListener("click", (event) => {
 });
 
 loadFailureOptions();
+if (initialIncidentKey && [...els.incidentSelect.options].some((option) => option.value === initialIncidentKey)) {
+  els.incidentSelect.value = initialIncidentKey;
+  if (initialIncidentKey === "website") setMode("realtime");
+}
 runAgents();
 refreshOpsStatus();
 refreshDemoSiteStatus();

@@ -501,12 +501,23 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/api/slack/interactions") {
       const rawBody = await readRawBody(req);
-      const approval = verifyAndRecordSlackApproval(req, rawBody, requestId);
-      sendJson(res, 200, {
-        ok: true,
-        approval,
-        message: "Signed Slack approval recorded"
-      }, requestId);
+      try {
+        const approval = verifyAndRecordSlackApproval(req, rawBody, requestId);
+        sendJson(res, 200, {
+          response_type: "ephemeral",
+          text: slackInteractionResponseText(approval),
+          approval
+        }, requestId);
+      } catch (slackError) {
+        if (slackError instanceof HttpError && slackError.status === 403) {
+          sendJson(res, 200, {
+            response_type: "ephemeral",
+            text: slackError.message
+          }, requestId);
+          return;
+        }
+        throw slackError;
+      }
       return;
     }
 
@@ -777,6 +788,17 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
   const approverId = payload.user?.id || payload.user?.username || "unknown";
   if (!slackApproverAllowlist.includes(approverId)) throw new HttpError(403, `Slack approver is not allowlisted: ${approverId}`);
   const actionId = action?.action_id || null;
+  if (actionId === "open_trinetra_incident") {
+    return {
+      incidentKey,
+      approverId,
+      state: "opened",
+      source: "slack-signed",
+      openedAt: new Date().toISOString(),
+      requestId,
+      actionId
+    };
+  }
   if (actionId && actionId !== "approve_remediation") {
     const rejected = {
       incidentKey,
@@ -805,6 +827,19 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
   clearPendingApprovalTimeout(incidentKey);
   void logger.info("slack_approval_recorded", approval).catch(() => {});
   return approval;
+}
+
+function slackInteractionResponseText(approval) {
+  if (approval.state === "approved") {
+    return `Trinetra recorded approval for ${approval.incidentKey}. Re-run the pipeline to continue remediation.`;
+  }
+  if (approval.state === "rejected") {
+    return `Trinetra recorded escalation for ${approval.incidentKey}.`;
+  }
+  if (approval.state === "opened") {
+    return `Opening Trinetra incident details for ${approval.incidentKey}.`;
+  }
+  return `Trinetra received Slack interaction for ${approval.incidentKey}.`;
 }
 
 function parseSlackPayload(rawBody, contentType = "") {
@@ -958,47 +993,65 @@ async function requestSlackApproval({ incidentKey, incident, commander, triage, 
 }
 
 function buildSlackApprovalMessage({ incidentKey, incident, commander, triage, gate, requestId }) {
-  const endpointText = publicBaseUrl
-    ? `Interactive endpoint: ${publicBaseUrl.replace(/\/$/, "")}/api/slack/interactions`
-    : "Interactive endpoint: configure your Slack app Request URL to the public /api/slack/interactions endpoint.";
+  const consoleUrl = buildConsoleUrl(incidentKey);
+  const actionElements = [
+    {
+      type: "button",
+      text: { type: "plain_text", text: "Approve" },
+      style: "primary",
+      action_id: "approve_remediation",
+      value: incidentKey
+    },
+    {
+      type: "button",
+      text: { type: "plain_text", text: "Escalate" },
+      style: "danger",
+      action_id: "escalate_remediation",
+      value: incidentKey
+    }
+  ];
+  if (consoleUrl) {
+    actionElements.push({
+      type: "button",
+      text: { type: "plain_text", text: "Open incident" },
+      action_id: "open_trinetra_incident",
+      url: consoleUrl,
+      value: incidentKey
+    });
+  }
   return {
     channel: slackApprovalChannelId,
     text: `Trinetra approval requested for ${incident.id} (${incident.service})`,
     blocks: [
       {
+        type: "header",
+        text: { type: "plain_text", text: "Trinetra approval requested" }
+      },
+      {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*Trinetra approval requested*\n*Incident:* ${incident.id} - ${incident.title}\n*Service:* ${incident.service}\n*Severity:* ${commander.severity}\n*Runbook:* ${triage.runbook.id} - ${triage.runbook.title}`
+          text: `*${incident.id}* · ${incident.service}\n${incident.title}`
         }
       },
       {
         type: "section",
         fields: [
+          { type: "mrkdwn", text: `*Severity*\n${commander.severity}` },
           { type: "mrkdwn", text: `*Gate*\n${gate.label}` },
-          { type: "mrkdwn", text: `*Timeout*\n${Math.round(verificationTimeoutMs / 1000)} seconds` },
-          { type: "mrkdwn", text: `*Request ID*\n${requestId}` },
-          { type: "mrkdwn", text: `*Endpoint*\n${endpointText}` }
+          { type: "mrkdwn", text: `*Runbook*\n${triage.runbook.id}` },
+          { type: "mrkdwn", text: `*Timeout*\n${Math.round(verificationTimeoutMs / 1000)}s` }
+        ]
+      },
+      {
+        type: "context",
+        elements: [
+          { type: "mrkdwn", text: `Request ${requestId}${consoleUrl ? " · details available in Trinetra" : " · set PUBLIC_BASE_URL to enable Open incident"}` }
         ]
       },
       {
         type: "actions",
-        elements: [
-          {
-            type: "button",
-            text: { type: "plain_text", text: "Approve remediation" },
-            style: "primary",
-            action_id: "approve_remediation",
-            value: incidentKey
-          },
-          {
-            type: "button",
-            text: { type: "plain_text", text: "Escalate only" },
-            style: "danger",
-            action_id: "escalate_remediation",
-            value: incidentKey
-          }
-        ]
+        elements: actionElements
       }
     ],
     metadata: {
@@ -1010,6 +1063,12 @@ function buildSlackApprovalMessage({ incidentKey, incident, commander, triage, g
       }
     }
   };
+}
+
+function buildConsoleUrl(incidentKey) {
+  if (!publicBaseUrl) return null;
+  const base = publicBaseUrl.replace(/\/$/, "");
+  return `${base}/?incident=${encodeURIComponent(incidentKey)}`;
 }
 
 function registerPendingApprovalTimeout(incidentKey, incident, gate, requestId) {
