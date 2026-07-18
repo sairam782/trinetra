@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trinetra</title>
     <link rel="icon" type="image/png" href="/assets/trinetra-mark-128.png" />
-    <link rel="stylesheet" href="/styles.css?v=20260718-live-execution-2" />
+    <link rel="stylesheet" href="/styles.css?v=20260718-instrument-panel-compact-2" />
   </head>
   <body>
     <main class="shell">
@@ -24,7 +24,18 @@
         </div>
         <div class="hero-stats" aria-label="Run telemetry">
           <div><span>Agent calls</span><strong id="callCount">0</strong></div>
-          <div><span>Known confidence</span><strong id="avgConfidence">Not available</strong></div>
+          <div class="iris-stat" id="irisWidget" style="--iris-open: 0.1">
+            <span>Known confidence</span>
+            <div class="iris-readout">
+              <svg class="iris-dial" viewBox="0 0 80 80" aria-hidden="true">
+                <circle class="iris-track" cx="40" cy="40" r="30" />
+                <circle class="iris-ring" cx="40" cy="40" r="30" />
+                <circle class="iris-mid" cx="40" cy="40" r="21" />
+                <circle class="iris-core" cx="40" cy="40" r="8" />
+              </svg>
+              <strong id="avgConfidence">Not available</strong>
+            </div>
+          </div>
           <div><span>Tokens</span><strong id="runCost">Not available</strong></div>
         </div>
       </header>
@@ -264,6 +275,6 @@
       </section>
     </main>
 
-    <script type="module" src="/app.js?v=20260718-live-execution-2"></script>
+    <script type="module" src="/app.js?v=20260718-instrument-panel-compact-2"></script>
   </body>
 </html>

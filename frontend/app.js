@@ -26,6 +26,7 @@ const els = {
   routeText: document.querySelector("#routeText"),
   callCount: document.querySelector("#callCount"),
   avgConfidence: document.querySelector("#avgConfidence"),
+  irisWidget: document.querySelector("#irisWidget"),
   runCost: document.querySelector("#runCost"),
   severityBadge: document.querySelector("#severityBadge"),
   incidentTitle: document.querySelector("#incidentTitle"),
@@ -249,6 +250,7 @@ function render(data) {
   els.routeText.textContent = route?.name || "--";
   animateNumber(els.callCount, totals.calls);
   els.avgConfidence.textContent = formatPercent(totals.confidence);
+  updateIris(totals.confidence, verification.status);
   els.runCost.textContent = formatTokens(totalUsage(qwenTrace));
 
   els.severityBadge.textContent = commander.severity;
@@ -723,10 +725,12 @@ function inspectQwenCall(call) {
       <div><span>Finish reason</span><strong>${escapeHtml(valueOrNA(call.finishReason))}</strong></div>
       <div><span>Timestamp</span><strong>${escapeHtml(formatTime(call.timestamp))}</strong></div>
     </div>
-    <section><h3>System Prompt</h3><pre>${escapeHtml(valueOrNA(call.systemPrompt))}</pre></section>
-    <section><h3>User Prompt</h3><pre>${escapeHtml(valueOrNA(call.userPrompt))}</pre></section>
-    <section><h3>Raw Response</h3><pre>${escapeHtml(valueOrNA(call.rawResponse))}</pre></section>
-    <section><h3>Parsed Response</h3><pre class="json-viewer">${syntaxHighlightJson(call.parsedResponse ?? null)}</pre></section>
+    <div class="inspector-scroll-grid">
+      <section><h3>System Prompt</h3><pre>${escapeHtml(valueOrNA(call.systemPrompt))}</pre></section>
+      <section><h3>User Prompt</h3><pre>${escapeHtml(valueOrNA(call.userPrompt))}</pre></section>
+      <section><h3>Raw Response</h3><pre>${escapeHtml(valueOrNA(call.rawResponse))}</pre></section>
+      <section><h3>Parsed Response</h3><pre class="json-viewer">${syntaxHighlightJson(call.parsedResponse ?? null)}</pre></section>
+    </div>
   `;
 }
 
@@ -751,6 +755,7 @@ function renderExecutionGraph(data) {
   const nodeOrder = ["ingest", "commander", "specialists", "adjudication", "triage", "gate", "remediation", "verification", "memory"];
   const activeIndex = nodeOrder.findLastIndex((node) => nodeEvents(data, node).length > 0);
   els.graphStatus.textContent = activeIndex >= 0 ? "runtime mapped" : "Not available";
+  els.agentGraph.style.setProperty("--active-index", String(Math.max(activeIndex, 0)));
   els.agentGraph.querySelectorAll("[data-node]").forEach((nodeEl, index) => {
     const node = nodeEl.dataset.node;
     const events = nodeEvents(data, node);
@@ -949,6 +954,7 @@ function labelFor(key) {
 }
 
 function setLoading(isLoading) {
+  document.body.classList.toggle("pipeline-running", isLoading);
   els.runButton.disabled = isLoading;
   els.solveWebsiteButton.disabled = isLoading;
   if (isLoading) {
@@ -958,6 +964,16 @@ function setLoading(isLoading) {
     els.runButton.textContent = currentMode === "realtime" ? "Run realtime probe" : "Run demo pipeline";
     els.solveWebsiteButton.textContent = "Run Trinetra pipeline";
   }
+}
+
+function updateIris(confidence, status = "") {
+  const value = typeof confidence === "number" && !Number.isNaN(confidence)
+    ? Math.max(0.06, Math.min(1, confidence))
+    : 0.06;
+  els.irisWidget?.style.setProperty("--iris-open", value.toFixed(3));
+  const statusText = String(status || "").toLowerCase();
+  els.irisWidget?.classList.toggle("verified", /healthy|verified|closed|success/.test(statusText));
+  els.irisWidget?.classList.toggle("alert", /fail|error|degraded|unhealthy|rollback|escalat/.test(statusText));
 }
 
 function animateNumber(element, value) {
