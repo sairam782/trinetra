@@ -1,8 +1,12 @@
 const els = {
   demoModeButton: document.querySelector("#demoModeButton"),
   realtimeModeButton: document.querySelector("#realtimeModeButton"),
+  workspaceKicker: document.querySelector("#workspaceKicker"),
+  workspaceTitle: document.querySelector("#workspaceTitle"),
+  workspaceDescription: document.querySelector("#workspaceDescription"),
   demoPanel: document.querySelector("#demoPanel"),
   realtimePanel: document.querySelector("#realtimePanel"),
+  interfaceStatus: document.querySelector("#interfaceStatus"),
   realtimeGeneratedAt: document.querySelector("#realtimeGeneratedAt"),
   realtimeEvents: document.querySelector("#realtimeEvents"),
   headerIncident: document.querySelector("#headerIncident"),
@@ -56,58 +60,129 @@ const els = {
   logStatus: document.querySelector("#logStatus"),
   refreshLogsButton: document.querySelector("#refreshLogsButton"),
   traceInspector: document.querySelector("#traceInspector"),
-  drawerStatus: document.querySelector("#drawerStatus")
+  drawerStatus: document.querySelector("#drawerStatus"),
+  drawerToggle: document.querySelector("#drawerToggle")
 };
 
 let currentMode = "demo";
-let realtimeTimer = null;
-let logTimer = null;
 let lastRunData = null;
 let currentLogs = [];
+let activePage = getActivePage();
+const PLACEHOLDER = "—";
+const pollers = {
+  realtime: { timer: null, active: false, failures: 0, baseDelay: 4_000, maxDelay: 60_000, task: null },
+  logs: { timer: null, active: false, failures: 0, baseDelay: 6_000, maxDelay: 60_000, task: null }
+};
 
 els.demoModeButton.addEventListener("click", () => setMode("demo"));
 els.realtimeModeButton.addEventListener("click", () => setMode("realtime"));
 els.runButton.addEventListener("click", runAgents);
-els.incidentSelect.addEventListener("change", runAgents);
-els.approvalSelect.addEventListener("change", runAgents);
+els.incidentSelect.addEventListener("change", () => setInterfaceStatus("Scenario updated. Ready to analyze."));
+els.approvalSelect.addEventListener("change", () => setInterfaceStatus("Execution policy updated. Ready to analyze."));
 els.injectErrorButton.addEventListener("click", injectDemoError);
 els.solveWebsiteButton.addEventListener("click", solveWebsiteIncident);
 els.refreshLogsButton.addEventListener("click", refreshLogs);
 els.logSearch.addEventListener("input", () => renderLogs(currentLogs));
+els.drawerToggle.addEventListener("click", () => {
+  const drawer = document.querySelector(".bottom-drawer");
+  setDrawerOpen(drawer.classList.contains("collapsed"));
+});
 els.agentGraph.addEventListener("click", (event) => {
   const node = event.target.closest("[data-node]");
   if (node) inspectGraphNode(node.dataset.node);
 });
+document.addEventListener("visibilitychange", handleVisibilityChange);
+document.querySelectorAll("[data-evidence-tab]").forEach((button) => {
+  button.addEventListener("click", () => selectEvidenceTab(button.dataset.evidenceTab, true));
+});
+
+applyPage(activePage);
+selectEvidenceTab(new URLSearchParams(window.location.search).get("tab") || "logs");
+if (activePage === "runtime") setMode("realtime");
 
 loadFailureOptions();
 runAgents();
 refreshOpsStatus();
 refreshDemoSiteStatus();
 refreshLogs();
-logTimer = setInterval(refreshLogs, 6000);
+startPolling("logs", refreshLogs);
 
 function setMode(mode) {
+  if (mode === "realtime" && activePage !== "runtime") {
+    window.location.assign("/runtime");
+    return;
+  }
+  if (mode === "demo" && activePage === "runtime") {
+    window.location.assign("/");
+    return;
+  }
+
   currentMode = mode;
   const realtime = mode === "realtime";
+  document.body.dataset.mode = mode;
   els.demoModeButton.classList.toggle("active", !realtime);
   els.realtimeModeButton.classList.toggle("active", realtime);
-  els.demoPanel.classList.toggle("hidden", realtime);
-  els.realtimePanel.classList.toggle("hidden", !realtime);
-  els.runButton.textContent = realtime ? "Run realtime probe" : "Run demo pipeline";
+  els.demoPanel.classList.toggle("hidden", realtime || activePage !== "overview");
+  els.realtimePanel.classList.toggle("hidden", !realtime || activePage !== "runtime");
+  els.runButton.textContent = realtime ? "Analyze live target" : "Analyze incident";
+  setInterfaceStatus(realtime ? "Realtime target selected. Refreshing live readiness." : "Demo scenario selected. Ready to analyze.");
 
   if (realtime) {
     els.incidentSelect.value = "website";
     refreshRealtimeStatus();
     refreshDemoSiteStatus();
-    realtimeTimer = setInterval(refreshRealtimeStatus, 4000);
-  } else if (realtimeTimer) {
-    clearInterval(realtimeTimer);
-    realtimeTimer = null;
+    startPolling("realtime", refreshRealtimeStatus);
+  } else {
+    stopPolling("realtime");
+  }
+}
+
+function startPolling(name, task) {
+  const poller = pollers[name];
+  poller.active = true;
+  poller.task = task;
+  schedulePoll(name);
+}
+
+function stopPolling(name) {
+  const poller = pollers[name];
+  poller.active = false;
+  if (poller.timer) window.clearTimeout(poller.timer);
+  poller.timer = null;
+}
+
+function schedulePoll(name, immediate = false) {
+  const poller = pollers[name];
+  if (!poller.active || document.hidden) return;
+  if (poller.timer) window.clearTimeout(poller.timer);
+  const delay = immediate ? 0 : Math.min(poller.maxDelay, poller.baseDelay * (2 ** poller.failures));
+  poller.timer = window.setTimeout(async () => {
+    poller.timer = null;
+    if (!document.hidden && poller.active) await poller.task({ polling: true });
+    schedulePoll(name);
+  }, delay);
+}
+
+function recordPollOutcome(name, successful) {
+  const poller = pollers[name];
+  poller.failures = successful ? 0 : Math.min(poller.failures + 1, 10);
+}
+
+function handleVisibilityChange() {
+  for (const name of Object.keys(pollers)) {
+    const poller = pollers[name];
+    if (document.hidden) {
+      if (poller.timer) window.clearTimeout(poller.timer);
+      poller.timer = null;
+    } else if (poller.active) {
+      schedulePoll(name, true);
+    }
   }
 }
 
 async function runAgents() {
   setLoading(true);
+  setInterfaceStatus(currentMode === "realtime" ? "Analyzing the live target…" : "Analyzing incident evidence…");
   try {
     renderLoadingTrace();
     const data = await fetchJson("/api/incidents/analyze", {
@@ -119,11 +194,13 @@ async function runAgents() {
       })
     });
     render(data);
+    setInterfaceStatus(`Analysis complete for ${data.incident?.id || "the selected incident"}.`);
   } catch (error) {
     console.error(error);
     els.rootCause.textContent = "Could not run incident agents";
     els.confidenceText.textContent = "Check the local server and try again.";
     els.headerStatus.textContent = "offline";
+    setInterfaceStatus("Analysis could not be completed. Check server availability and try again.", true);
   } finally {
     setLoading(false);
     refreshLogs();
@@ -134,10 +211,10 @@ function render(data) {
   lastRunData = data;
   const { incident, commander, specialists, adjudication, triage, remediationPlan, gate, verification, audit, totals, mcps, mcpTrace, executionTimeline, qwenTrace, runId, requestId, mode, route, qwen } = data;
   els.modeText.textContent = mode;
-  els.headerIncident.textContent = incident?.id || "Not available";
-  els.runIdText.textContent = runId;
-  els.requestIdText.textContent = requestId;
-  els.routeText.textContent = route?.name || "--";
+  els.headerIncident.textContent = incident?.id || PLACEHOLDER;
+  els.runIdText.textContent = runId || PLACEHOLDER;
+  els.requestIdText.textContent = requestId || PLACEHOLDER;
+  els.routeText.textContent = route?.name || PLACEHOLDER;
   animateNumber(els.callCount, totals.calls);
   els.avgConfidence.textContent = formatPercent(totals.confidence);
   els.runCost.textContent = formatTokens(totalUsage(qwenTrace));
@@ -156,7 +233,7 @@ function render(data) {
   els.gateLabel.textContent = gate.label;
   els.gateAction.textContent = `${gate.action}. Reason: ${gate.reason}. Risk: ${triage.runbook.risk}. Steps: ${triage.runbook.steps.join(" -> ")}.`;
   els.verificationStatus.textContent = verification.status;
-  els.headerStatus.textContent = verification.status || gate.label || "Not available";
+  els.headerStatus.textContent = verification.status || gate.label || PLACEHOLDER;
   renderMetricDelta(incident.metrics, verification.after);
   renderRemediationTimeline(remediationPlan, true);
   renderAgents(specialists);
@@ -239,7 +316,7 @@ async function refreshOpsStatus() {
   if (readiness.status === "fulfilled") {
     els.readinessText.textContent = readiness.value.ready ? "ready" : "not ready";
   } else {
-    els.readinessText.textContent = "unknown";
+    els.readinessText.textContent = PLACEHOLDER;
   }
 }
 
@@ -255,7 +332,7 @@ async function refreshDemoSiteStatus() {
       ? `Recovered from ${status.failureLabel}. /demo-store returns ${status.httpStatus}. Pipeline action: ${status.lastAction || "not yet"}.`
       : `${status.failureLabel} active. /demo-store returns ${status.httpStatus}: ${status.error}. ${status.symptom}`;
   } catch {
-    els.demoSiteTitle.textContent = "Storefront status: unknown";
+    els.demoSiteTitle.textContent = `Storefront status: ${PLACEHOLDER}`;
     els.demoSiteTitle.className = "status-pill inactive";
   }
 }
@@ -275,15 +352,101 @@ async function loadFailureOptions() {
 }
 
 async function injectDemoError() {
-  await fetchJson("/api/demo-site/inject-error", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ failureId: els.failureSelect.value })
+  try {
+    setInterfaceStatus("Injecting selected storefront failure…");
+    await fetchJson("/api/demo-site/inject-error", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ failureId: els.failureSelect.value })
+    });
+    els.incidentSelect.value = "website";
+    els.approvalSelect.value = "pending";
+    await refreshDemoSiteStatus();
+    await refreshRealtimeStatus();
+    setInterfaceStatus("Storefront failure injected. Run the analysis when ready.");
+  } catch (error) {
+    console.error(error);
+    setInterfaceStatus("Unable to inject the selected storefront failure.", true);
+  }
+}
+
+function getActivePage() {
+  const pageByPath = {
+    "/": "overview",
+    "/runtime": "runtime",
+    "/evidence": "evidence",
+    "/integrations": "integrations"
+  };
+  return pageByPath[window.location.pathname] || "overview";
+}
+
+function applyPage(page) {
+  const pages = {
+    overview: {
+      kicker: "Incident intelligence",
+      title: "Command overview",
+      description: "Choose an incident, guide the analysis, and make an informed next decision."
+    },
+    runtime: {
+      kicker: "Live system view",
+      title: "Runtime operations",
+      description: "Monitor execution, agent outputs, logs, and the recorded history of every run."
+    },
+    evidence: {
+      kicker: "Decision record",
+      title: "Evidence and reasoning",
+      description: "Inspect the execution timeline, model trace, prompts, responses, and verification evidence."
+    },
+    integrations: {
+      kicker: "Connected capabilities",
+      title: "Integrations",
+      description: "Review MCP connector readiness and the activity that informed the incident response."
+    }
+  };
+  const details = pages[page] || pages.overview;
+
+  document.body.dataset.page = page;
+  document.querySelectorAll("[data-page]").forEach((section) => {
+    section.classList.toggle("page-hidden", !section.dataset.page.split(" ").includes(page));
   });
-  els.incidentSelect.value = "website";
-  els.approvalSelect.value = "pending";
-  await refreshDemoSiteStatus();
-  await runAgents();
+  document.querySelectorAll("[data-nav]").forEach((link) => {
+    const active = link.dataset.nav === page;
+    link.classList.toggle("active", active);
+    link.toggleAttribute("aria-current", active);
+  });
+  els.workspaceKicker.textContent = details.kicker;
+  els.workspaceTitle.textContent = details.title;
+  els.workspaceDescription.textContent = details.description;
+  document.title = `Trinetra · ${details.title}`;
+}
+
+function selectEvidenceTab(tab, updateUrl = false) {
+  const validTabs = new Set(["logs", "audit", "timeline", "qwen", "connectors", "mcp", "runs"]);
+  const selected = validTabs.has(tab) ? tab : "logs";
+  document.querySelectorAll("[data-evidence-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.evidencePanel !== selected;
+  });
+  document.querySelectorAll("[data-evidence-tab]").forEach((button) => {
+    const active = button.dataset.evidenceTab === selected;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+
+  const navForTab = ["connectors", "mcp"].includes(selected) ? "integrations" : "evidence";
+  const selectedNav = activePage === "runtime" ? "runtime" : navForTab;
+  document.querySelectorAll("[data-nav]").forEach((link) => {
+    const active = activePage === "overview" ? link.dataset.nav === "overview" : link.dataset.nav === selectedNav;
+    link.classList.toggle("active", active);
+    link.toggleAttribute("aria-current", active);
+  });
+
+  if (updateUrl) {
+    const url = new URL(window.location.href);
+    url.pathname = `/${navForTab}`;
+    url.searchParams.set("tab", selected);
+    window.history.replaceState({}, "", url);
+  }
 }
 
 async function solveWebsiteIncident() {
@@ -301,13 +464,15 @@ async function refreshRecentRuns() {
   }
 }
 
-async function refreshRealtimeStatus() {
+async function refreshRealtimeStatus({ polling = false } = {}) {
   try {
     const status = await fetchJson("/api/realtime/status");
     renderRealtimeStatus(status);
+    if (polling) recordPollOutcome("realtime", true);
   } catch (error) {
     console.warn(error);
     els.realtimeGeneratedAt.textContent = "offline";
+    if (polling) recordPollOutcome("realtime", false);
   }
 }
 
@@ -320,10 +485,10 @@ function renderRealtimeStatus(status) {
   const syntheticEvent = {
     stage: "Synthetic uptime check",
     status: status.synthetic?.healthy === null || status.synthetic?.healthy === undefined
-      ? "Not available"
+      ? PLACEHOLDER
       : status.synthetic.healthy ? "healthy" : "unhealthy",
     text: status.synthetic?.lastCheckedAt
-      ? `${status.synthetic.targetUrl || "Not available"} returned ${status.synthetic.status ?? "Not available"} in ${status.synthetic.latencyMs ?? "Not available"}ms`
+      ? `${status.synthetic.targetUrl || PLACEHOLDER} returned ${status.synthetic.status ?? PLACEHOLDER} in ${status.synthetic.latencyMs ?? PLACEHOLDER}ms`
       : "No live synthetic probe has completed yet.",
     timestamp: status.synthetic?.lastCheckedAt || null
   };
@@ -334,7 +499,7 @@ function renderRealtimeStatus(status) {
       ? `Posting approval requests to ${status.slack.approvalChannelId}`
       : status.slack?.approvalChannelConfigured === false
         ? "Missing SLACK_APPROVAL_CHANNEL_ID; approval requests are not posted to Slack."
-        : "Not available",
+        : PLACEHOLDER,
     timestamp: status.generatedAt || null
   };
   els.realtimeEvents.replaceChildren(...[syntheticEvent, slackEvent, ...status.liveEvents].map((event) => {
@@ -373,12 +538,20 @@ function renderRealtimeStatus(status) {
 }
 
 async function fetchJson(url, options = {}) {
+  const requestUrl = withApiBase(url);
   if (typeof window.fetch === "function") {
-    const response = await window.fetch(url, options);
-    if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
+    const response = await window.fetch(requestUrl, options);
+    if (!response.ok) throw new Error(`${requestUrl} failed: ${response.status}`);
     return response.json();
   }
-  return xhrJson(url, options);
+  return xhrJson(requestUrl, options);
+}
+
+function withApiBase(url) {
+  if (/^https?:\/\//i.test(url)) return url;
+  const apiBase = document.querySelector('meta[name="api-base"]')?.content?.trim() || "";
+  if (!apiBase) return url;
+  return `${apiBase.replace(/\/$/, "")}/${String(url).replace(/^\//, "")}`;
 }
 
 function xhrJson(url, options = {}) {
@@ -429,7 +602,7 @@ function renderAudit(audit) {
     row.innerHTML = `
       <div class="audit-meta">
         <strong>${escapeHtml(item.agent)}</strong>
-        <span>${item.id} · ${formatLatency(item.latencyMs)} · ${formatPercent(item.confidence)}</span>
+        <span>${escapeHtml(item.id)} · ${formatLatency(item.latencyMs)} · ${formatPercent(item.confidence)}</span>
       </div>
       ${item.model ? `<div class="mcp-chip">${escapeHtml(item.model)} / ${escapeHtml(formatTokens(item.tokens))}${item.fallback ? " / fallback" : ""}</div>` : ""}
       ${item.mcp ? `<div class="mcp-chip">${escapeHtml(item.mcp.name)} / ${escapeHtml(item.mcp.action)} / ${escapeHtml(item.mcp.status)}</div>` : ""}
@@ -473,7 +646,7 @@ function renderQwenTrace(trace = []) {
     const details = document.createElement("details");
     details.className = "trace-item qwen-call";
     details.addEventListener("toggle", () => {
-      if (details.open) inspectQwenCall(call);
+      if (details.open) inspectQwenCall(call, true);
     });
     details.innerHTML = `
       <summary>
@@ -521,7 +694,7 @@ function emptyTrace(text) {
   return article;
 }
 
-function inspectQwenCall(call) {
+function inspectQwenCall(call, openInspector = false) {
   els.drawerStatus.textContent = `${valueOrNA(call.agent || call.role)} · ${valueOrNA(call.model)}`;
   els.traceInspector.innerHTML = `
     <div class="inspector-grid">
@@ -535,6 +708,14 @@ function inspectQwenCall(call) {
     <section><h3>Raw Response</h3><pre>${escapeHtml(valueOrNA(call.rawResponse))}</pre></section>
     <section><h3>Parsed Response</h3><pre>${escapeHtml(JSON.stringify(call.parsedResponse ?? null, null, 2))}</pre></section>
   `;
+  if (openInspector) setDrawerOpen(true);
+}
+
+function setDrawerOpen(open) {
+  const drawer = document.querySelector(".bottom-drawer");
+  drawer.classList.toggle("collapsed", !open);
+  els.drawerToggle.textContent = open ? "Close inspector" : "Open inspector";
+  els.drawerToggle.setAttribute("aria-expanded", String(open));
 }
 
 function inspectGraphNode(node) {
@@ -549,7 +730,7 @@ function inspectGraphNode(node) {
   });
   els.graphNodeDetails.innerHTML = `
     <strong>${escapeHtml(labelFor(node))}</strong>
-    <span>${matching.length ? `${matching.length} runtime entries` : "Not available"}</span>
+    <span>${matching.length ? `${matching.length} runtime entries` : PLACEHOLDER}</span>
     <pre>${escapeHtml(JSON.stringify(matching.slice(0, 4), null, 2))}</pre>
   `;
 }
@@ -557,7 +738,7 @@ function inspectGraphNode(node) {
 function renderExecutionGraph(data) {
   const nodeOrder = ["ingest", "commander", "specialists", "adjudication", "triage", "gate", "remediation", "verification", "memory"];
   const activeIndex = nodeOrder.findLastIndex((node) => nodeEvents(data, node).length > 0);
-  els.graphStatus.textContent = activeIndex >= 0 ? "runtime mapped" : "Not available";
+  els.graphStatus.textContent = activeIndex >= 0 ? "runtime mapped" : PLACEHOLDER;
   els.agentGraph.querySelectorAll("[data-node]").forEach((nodeEl, index) => {
     const node = nodeEl.dataset.node;
     const events = nodeEvents(data, node);
@@ -570,6 +751,17 @@ function renderExecutionGraph(data) {
       nodeEl.classList.add("future");
     } else {
       nodeEl.classList.add("inactive");
+    }
+  });
+  els.agentGraph.querySelectorAll("[data-to]").forEach((connector) => {
+    const target = connector.dataset.to;
+    const targetIndex = nodeOrder.indexOf(target);
+    const events = nodeEvents(data, target);
+    connector.classList.remove("completed", "current", "failed");
+    if (events.some((event) => /fail|error|unhealthy|blocked|escalate/i.test(JSON.stringify(event)))) {
+      connector.classList.add("failed");
+    } else if (events.length) {
+      connector.classList.add(targetIndex === activeIndex ? "current" : "completed");
     }
   });
   inspectGraphNode(nodeOrder[Math.max(activeIndex, 0)]);
@@ -649,16 +841,18 @@ function renderRecentRuns(runs = []) {
   }));
 }
 
-async function refreshLogs() {
+async function refreshLogs({ polling = false } = {}) {
   try {
     const logs = await fetchJson("/api/logs?limit=160");
     currentLogs = Array.isArray(logs) ? logs : [];
-    els.logStatus.textContent = currentLogs.length ? `${currentLogs.length} entries` : "Not available";
+    els.logStatus.textContent = currentLogs.length ? `${currentLogs.length} entries` : PLACEHOLDER;
     renderLogs(currentLogs);
+    if (polling) recordPollOutcome("logs", true);
   } catch (error) {
     console.warn(error);
     els.logStatus.textContent = "offline";
     els.liveLogs.replaceChildren(emptyTrace("Log endpoint is not available"));
+    if (polling) recordPollOutcome("logs", false);
   }
 }
 
@@ -679,7 +873,7 @@ function renderLogs(logs = []) {
     row.innerHTML = `
       <span>${escapeHtml(formatTime(entry.ts || entry.timestamp || entry.time))}</span>
       <strong>${escapeHtml(level.toUpperCase())}</strong>
-      <code>${escapeHtml(entry.event || entry.message || "Not available")}</code>
+      <code>${escapeHtml(entry.event || entry.message || PLACEHOLDER)}</code>
       <pre>${escapeHtml(JSON.stringify(entry, null, 2))}</pre>
     `;
     return row;
@@ -700,33 +894,33 @@ function renderMetricDelta(before, after = {}) {
 function formatEvidence(evidence) {
   if (Array.isArray(evidence)) return evidence.join(" | ");
   if (evidence && typeof evidence === "object") return Object.entries(evidence).map(([key, value]) => `${labelFor(key)}=${Array.isArray(value) ? value.join(",") : value}`).join(" · ");
-  return evidence || "Not available";
+  return evidence || PLACEHOLDER;
 }
 
 function valueOrNA(value) {
-  if (value === null || value === undefined || value === "") return "Not available";
+  if (value === null || value === undefined || value === "") return PLACEHOLDER;
   return String(value);
 }
 
 function formatPercent(value) {
-  if (typeof value !== "number" || Number.isNaN(value)) return "Not available";
+  if (typeof value !== "number" || Number.isNaN(value)) return PLACEHOLDER;
   return `${Math.round(value * 100)}%`;
 }
 
 function formatCost(value) {
-  if (typeof value !== "number" || Number.isNaN(value)) return "Not available";
+  if (typeof value !== "number" || Number.isNaN(value)) return PLACEHOLDER;
   return `$${value.toFixed(4)}`;
 }
 
 function formatLatency(value) {
-  if (typeof value !== "number" || Number.isNaN(value)) return "Not available";
+  if (typeof value !== "number" || Number.isNaN(value)) return PLACEHOLDER;
   return `${Math.round(value)} ms`;
 }
 
 function formatTokens(tokens) {
-  if (!tokens) return "Tokens not available";
+  if (!tokens) return PLACEHOLDER;
   const total = tokens.total_tokens ?? tokens.total;
-  if (typeof total !== "number") return "Tokens not available";
+  if (typeof total !== "number") return PLACEHOLDER;
   return `${total} tokens`;
 }
 
@@ -745,9 +939,9 @@ function totalUsage(trace = []) {
 }
 
 function formatTime(timestamp) {
-  if (!timestamp) return "Not available";
+  if (!timestamp) return PLACEHOLDER;
   const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return "Not available";
+  if (Number.isNaN(date.getTime())) return PLACEHOLDER;
   return date.toLocaleTimeString();
 }
 
@@ -756,20 +950,28 @@ function labelFor(key) {
 }
 
 function setLoading(isLoading) {
+  document.querySelector(".shell").setAttribute("aria-busy", String(isLoading));
+  document.body.classList.toggle("is-loading", isLoading);
+  if (!isLoading) document.querySelectorAll("[data-skeleton]").forEach((element) => element.removeAttribute("data-skeleton"));
   els.runButton.disabled = isLoading;
   els.solveWebsiteButton.disabled = isLoading;
   if (isLoading) {
     els.runButton.textContent = currentMode === "realtime" ? "Probing..." : "Running...";
     els.solveWebsiteButton.textContent = "Running...";
   } else {
-    els.runButton.textContent = currentMode === "realtime" ? "Run realtime probe" : "Run demo pipeline";
+    els.runButton.textContent = currentMode === "realtime" ? "Analyze live target" : "Analyze incident";
     els.solveWebsiteButton.textContent = "Run Trinetra pipeline";
   }
 }
 
+function setInterfaceStatus(message, isError = false) {
+  els.interfaceStatus.textContent = message;
+  els.interfaceStatus.classList.toggle("error", isError);
+}
+
 function animateNumber(element, value) {
   if (typeof value !== "number" || Number.isNaN(value)) {
-    element.textContent = "Not available";
+    element.textContent = PLACEHOLDER;
     return;
   }
   const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;

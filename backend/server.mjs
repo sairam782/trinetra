@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 import { loadEnvFile } from "./config/env-loader.mjs";
 import { getAlibabaDeploymentProof } from "./cloud/alibaba-client.mjs";
 import { qwenChatJson, qwenRuntimeConfig } from "./cloud/qwen-client.mjs";
@@ -14,7 +15,7 @@ loadEnvFile();
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = join(__dirname, "..");
-const publicDir = join(repoRoot, "frontend");
+const publicDir = join(repoRoot, "frontend", "dist");
 const dataDir = join(repoRoot, "data");
 const auditLogPath = join(dataDir, "incident-runs.jsonl");
 const backendLogPath = join(dataDir, "backend-events.jsonl");
@@ -193,7 +194,8 @@ const mimeTypes = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
-  ".png": "image/png"
+  ".png": "image/png",
+  ".webp": "image/webp"
 };
 
 class HttpError extends Error {
@@ -617,19 +619,27 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const safePath = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, "");
-    const filePath = safePath === "/" ? join(publicDir, "index.html") : join(publicDir, safePath);
+    const requestedPath = decodeURIComponent(url.pathname);
+    const safePath = normalize(requestedPath).replace(/^(\.\.[/\\])+/, "");
+    const dashboardRoutes = new Set(["/", "/runtime", "/evidence", "/integrations"]);
+    const filePath = dashboardRoutes.has(requestedPath) ? join(publicDir, "index.html") : join(publicDir, safePath);
     if (!filePath.startsWith(publicDir)) {
       sendJson(res, 403, { error: "Forbidden", requestId }, requestId);
       return;
     }
 
     const file = await readFile(filePath);
+    const contentType = mimeTypes[extname(filePath)] || "application/octet-stream";
+    const compressed = compressStaticFile(file, contentType, req.headers["accept-encoding"]);
+    const contentHashed = /\.[a-f0-9]{10}\.(?:js|css|webp)$/i.test(filePath);
     res.writeHead(200, securityHeaders({
-      "content-type": mimeTypes[extname(filePath)] || "application/octet-stream",
-      "cache-control": filePath.endsWith("index.html") ? "no-store" : "public, max-age=300"
+      "content-type": contentType,
+      "cache-control": filePath.endsWith("index.html") ? "no-store" : contentHashed ? "public, max-age=31536000, immutable" : "public, max-age=300",
+      "content-length": compressed.body.length,
+      "vary": "Accept-Encoding",
+      ...(compressed.encoding ? { "content-encoding": compressed.encoding } : {})
     }, requestId));
-    res.end(req.method === "HEAD" ? undefined : file);
+    res.end(req.method === "HEAD" ? undefined : compressed.body);
   } catch (error) {
     if (error instanceof HttpError) {
       void logger.warn("http_error", {
@@ -684,6 +694,14 @@ async function readRawBody(req) {
     raw += chunk;
   }
   return raw;
+}
+
+function compressStaticFile(file, contentType, acceptEncoding = "") {
+  const supportsCompression = /^(text\/|application\/(?:javascript|json)|image\/svg\+xml)/.test(contentType);
+  if (!supportsCompression || file.length < 1_024) return { body: file, encoding: null };
+  if (/\bbr\b/.test(acceptEncoding)) return { body: brotliCompressSync(file), encoding: "br" };
+  if (/\bgzip\b/.test(acceptEncoding)) return { body: gzipSync(file), encoding: "gzip" };
+  return { body: file, encoding: null };
 }
 
 function sendJson(res, status, payload, requestId = crypto.randomUUID()) {

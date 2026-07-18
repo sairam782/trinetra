@@ -3,5 +3,8 @@ data/
 .env
 .DS_Store
 npm-debug.log*
+debug.log
 coverage/
 dist/
+test-results/
+playwright-report/

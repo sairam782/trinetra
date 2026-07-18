@@ -3,39 +3,59 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Trinetra</title>
-    <link rel="icon" type="image/png" href="/assets/trinetra-mark-128.png" />
-    <link rel="stylesheet" href="/styles.css?v=20260717-enterprise-console" />
+    <meta name="api-base" content="" />
+    <title>Trinetra · Incident command</title>
+    <link rel="icon" type="image/webp" href="/assets/trinetra-mark-128.webp" />
+    <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body>
+  <body data-mode="demo">
+    <a class="skip-link" href="#incident-workspace">Skip to incident workspace</a>
     <main class="shell">
       <header class="console-header">
         <div class="brand-lockup" aria-label="Trinetra">
-          <img class="brand-mark" src="/assets/trinetra-mark.png" alt="" aria-hidden="true" />
+          <img class="brand-mark" src="/assets/trinetra-mark.webp" alt="" aria-hidden="true" width="42" height="42" />
           <div>
             <h1>Trinetra</h1>
-            <p class="subhead">Incident Response</p>
+            <p class="subhead">Autonomous incident command</p>
           </div>
         </div>
         <div class="incident-context" aria-label="Current incident context">
-          <div><span>Current incident</span><strong id="headerIncident">Not available</strong></div>
+          <div><span>Current incident</span><strong id="headerIncident" data-skeleton>—</strong></div>
           <div><span>Environment</span><strong>local</strong></div>
-          <div><span>Status</span><strong id="headerStatus">checking</strong></div>
+          <div><span>Status</span><strong id="headerStatus" data-skeleton>—</strong></div>
         </div>
         <div class="hero-stats" aria-label="Run telemetry">
-          <div><span>Agent calls</span><strong id="callCount">0</strong></div>
-          <div><span>Known confidence</span><strong id="avgConfidence">Not available</strong></div>
-          <div><span>Tokens</span><strong id="runCost">Not available</strong></div>
+          <div><span>Agent calls</span><strong id="callCount" data-skeleton>—</strong></div>
+          <div><span>Known confidence</span><strong id="avgConfidence" data-skeleton>—</strong></div>
+          <div><span>Tokens</span><strong id="runCost" data-skeleton>—</strong></div>
         </div>
       </header>
 
-      <section class="command-bar">
+      <nav class="section-nav" aria-label="Workspace sections">
+        <a href="/" data-nav="overview">Overview</a>
+        <a href="/runtime" data-nav="runtime">Runtime</a>
+        <a href="/evidence?tab=timeline" data-nav="evidence">Evidence</a>
+        <a href="/integrations?tab=connectors" data-nav="integrations">Integrations</a>
+        <span id="interfaceStatus" class="interface-status" role="status" aria-live="polite">Preparing workspace</span>
+      </nav>
+
+      <section class="workspace-intro" aria-labelledby="workspaceTitle">
+        <p id="workspaceKicker" class="eyebrow">Incident intelligence</p>
+        <h2 id="workspaceTitle">Overview</h2>
+        <p id="workspaceDescription">Choose an incident, guide the analysis, and make an informed next decision.</p>
+      </section>
+
+      <section class="command-bar" data-page="overview">
+        <div class="command-bar-label">
+          <span>Workspace</span>
+          <strong>Analysis controls</strong>
+        </div>
         <div class="mode-switch" role="group" aria-label="Trinetra mode">
           <button id="demoModeButton" class="active" type="button">Demo</button>
           <button id="realtimeModeButton" type="button">Realtime</button>
         </div>
         <div class="field">
-          <label for="incidentSelect">Pipeline incident</label>
+          <label for="incidentSelect">Incident scenario</label>
           <select id="incidentSelect">
             <option value="latency">Checkout API latency spike</option>
             <option value="disk">Primary database disk pressure</option>
@@ -44,16 +64,37 @@
           </select>
         </div>
         <div class="field">
-          <label for="approvalSelect">Approval request</label>
+          <label for="approvalSelect">Execution policy</label>
           <select id="approvalSelect">
             <option value="pending">Pending approval</option>
             <option value="approved">Requested approval</option>
           </select>
         </div>
-        <button id="runButton" class="primary-action">Run demo pipeline</button>
+        <button id="runButton" class="primary-action">Analyze incident</button>
       </section>
 
-      <section id="demoPanel" class="demo-overview">
+      <section class="command-hero" data-page="overview" aria-labelledby="commandHeroTitle">
+        <div class="command-hero-copy">
+          <p class="eyebrow">Trinetra incident command</p>
+          <h2 id="commandHeroTitle">From alert to verified recovery, <span>without losing the thread.</span></h2>
+          <p>Bring evidence, model reasoning, safe actions, and audit history into one deliberate operator workflow.</p>
+          <div class="hero-safeguards" aria-label="Safety guardrails">
+            <span>Approval-gated actions</span>
+            <span>Evidence-backed decisions</span>
+            <span>Verified recovery</span>
+          </div>
+        </div>
+        <div class="hero-signal" aria-label="Command posture">
+          <div class="signal-orbit"><span></span></div>
+          <div>
+            <span class="eyebrow">Command posture</span>
+            <strong>Observe. Decide. Verify.</strong>
+            <p>Production guardrails stay visible at every step.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="demoPanel" class="demo-overview" data-page="overview">
         <div>
           <p class="eyebrow">Demo mode</p>
           <h2>Recorded execution review</h2>
@@ -67,7 +108,7 @@
         </div>
       </section>
 
-      <section id="realtimePanel" class="realtime-panel hidden">
+      <section id="realtimePanel" class="realtime-panel hidden" data-page="runtime">
         <article class="realtime-site-control">
           <div class="panel-heading">
             <p class="eyebrow">Realtime target website</p>
@@ -113,23 +154,23 @@
         </article>
       </section>
 
-      <section class="prod-strip" aria-label="Production status">
-        <div><span>Mode</span><strong id="modeText">--</strong></div>
-        <div><span>Health</span><strong id="healthText">checking</strong></div>
-        <div><span>Readiness</span><strong id="readinessText">checking</strong></div>
-        <div><span>Run ID</span><strong id="runIdText">--</strong></div>
-        <div><span>Request ID</span><strong id="requestIdText">--</strong></div>
-        <div><span>Route</span><strong id="routeText">--</strong></div>
+      <section class="prod-strip" data-page="overview" aria-label="Production status">
+        <div><span>Mode</span><strong id="modeText" data-skeleton>—</strong></div>
+        <div><span>Health</span><strong id="healthText" data-skeleton>—</strong></div>
+        <div><span>Readiness</span><strong id="readinessText" data-skeleton>—</strong></div>
+        <div><span>Run ID</span><strong id="runIdText" data-skeleton>—</strong></div>
+        <div><span>Request ID</span><strong id="requestIdText" data-skeleton>—</strong></div>
+        <div><span>Route</span><strong id="routeText" data-skeleton>—</strong></div>
       </section>
 
-      <section class="grid">
+      <section id="incident-workspace" class="grid" data-page="overview">
         <aside class="incident-panel">
           <div class="panel-heading">
             <p class="eyebrow">Current alert</p>
             <span id="severityBadge">Ready</span>
           </div>
-          <h2 id="incidentTitle">Select an incident</h2>
-          <p id="incidentAlert" class="muted">Run the agents to start triage.</p>
+          <h2 id="incidentTitle" data-skeleton>—</h2>
+          <p id="incidentAlert" class="muted" data-skeleton>—</p>
           <dl>
             <div><dt>Service</dt><dd id="serviceName">--</dd></div>
             <div><dt>Impact</dt><dd id="impactText">--</dd></div>
@@ -138,12 +179,35 @@
           </dl>
         </aside>
 
+        <article class="outcome-hero" aria-live="polite">
+          <div class="outcome-summary">
+            <p class="eyebrow">Adjudicated outcome</p>
+            <h2 id="rootCause" data-skeleton>—</h2>
+            <p id="confidenceText" class="muted" data-skeleton>—</p>
+          </div>
+          <div class="outcome-verification">
+            <p class="eyebrow">Verification</p>
+            <strong id="verificationStatus" data-skeleton>—</strong>
+            <div id="metricDelta" class="metric-delta"></div>
+          </div>
+        </article>
+
         <section class="flow-panel" aria-label="Agent architecture">
           <div class="panel-heading">
             <p class="eyebrow">Execution graph</p>
             <span id="graphStatus">waiting</span>
           </div>
           <div id="agentGraph" class="pipeline-grid">
+            <svg class="pipeline-connectors" viewBox="0 0 900 420" preserveAspectRatio="none" aria-hidden="true">
+              <path class="flow-connector" data-to="commander" d="M150 70H450" />
+              <path class="flow-connector" data-to="specialists" d="M450 70H750" />
+              <path class="flow-connector" data-to="adjudication" d="M750 70V210" />
+              <path class="flow-connector" data-to="triage" d="M750 210H450" />
+              <path class="flow-connector" data-to="gate" d="M450 210H150" />
+              <path class="flow-connector" data-to="remediation" d="M150 210V350" />
+              <path class="flow-connector" data-to="verification" d="M150 350H450" />
+              <path class="flow-connector" data-to="memory" d="M450 350H750" />
+            </svg>
             <button class="flow-layer inactive" type="button" data-node="ingest"><span>Alert</span><small>Correlate alert context</small></button>
             <button class="flow-layer inactive ai" type="button" data-node="commander"><span>Commander</span><small>Severity and route</small></button>
             <button class="flow-layer inactive tool" type="button" data-node="specialists"><span>Specialists</span><small>Logs · metrics · traces · memory</small></button>
@@ -159,28 +223,18 @@
 
         <section class="right-stack">
           <article class="decision-card">
-            <p class="eyebrow">Adjudicated root cause</p>
-            <h2 id="rootCause">Waiting for agent run</h2>
-            <p id="confidenceText" class="muted">Specialists will negotiate once an alert is analyzed.</p>
-          </article>
-          <article class="decision-card">
             <p class="eyebrow">Remediation gate</p>
-            <h2 id="gateLabel">--</h2>
-            <p id="gateAction" class="muted">--</p>
+            <h2 id="gateLabel" data-skeleton>—</h2>
+            <p id="gateAction" class="muted" data-skeleton>—</p>
           </article>
           <article class="decision-card">
             <p class="eyebrow">Tool Execution</p>
             <div id="remediationTimeline" class="tool-timeline"></div>
           </article>
-          <article class="decision-card">
-            <p class="eyebrow">Verification</p>
-            <h2 id="verificationStatus">--</h2>
-            <div id="metricDelta" class="metric-delta"></div>
-          </article>
         </section>
       </section>
 
-      <section class="lower-grid">
+      <section id="runtime-output" class="runtime-layout" data-page="evidence integrations">
         <article class="agents-panel">
           <div class="panel-heading">
             <p class="eyebrow">Agent outputs</p>
@@ -189,80 +243,67 @@
           <div id="agentCards" class="agent-cards"></div>
         </article>
 
-        <article class="logs-panel">
-          <div class="panel-heading">
-            <p class="eyebrow">Logs</p>
-            <span id="logStatus">waiting</span>
+        <section class="supporting-evidence" aria-label="Supporting evidence">
+          <div class="evidence-tabs" role="tablist" aria-label="Supporting evidence views">
+            <button type="button" role="tab" aria-selected="true" aria-controls="evidence-logs" id="tab-logs" data-evidence-tab="logs">Logs</button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="evidence-audit" id="tab-audit" data-evidence-tab="audit">Audit</button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="evidence-timeline" id="tab-timeline" data-evidence-tab="timeline">Timeline</button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="evidence-qwen" id="tab-qwen" data-evidence-tab="qwen">Qwen trace</button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="evidence-connectors" id="tab-connectors" data-evidence-tab="connectors">Connectors</button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="evidence-mcp" id="tab-mcp" data-evidence-tab="mcp">MCP activity</button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="evidence-runs" id="tab-runs" data-evidence-tab="runs">Runs</button>
           </div>
-          <div class="log-toolbar">
-            <input id="logSearch" type="search" placeholder="Filter logs" aria-label="Filter logs" />
-            <button id="refreshLogsButton" type="button">Refresh</button>
-          </div>
-          <div id="liveLogs" class="live-logs"></div>
-        </article>
 
-        <article class="audit-panel">
-          <div class="panel-heading">
-            <p class="eyebrow">Audit Log</p>
-            <span>persisted runtime entries</span>
-          </div>
-          <div id="auditRows" class="audit-rows"></div>
-        </article>
+          <article class="logs-panel evidence-panel" id="evidence-logs" role="tabpanel" aria-labelledby="tab-logs" data-evidence-panel="logs">
+            <div class="panel-heading"><p class="eyebrow">Logs</p><span id="logStatus">Loading</span></div>
+            <div class="log-toolbar"><input id="logSearch" type="search" placeholder="Filter logs" aria-label="Filter logs" /><button id="refreshLogsButton" type="button">Refresh</button></div>
+            <div id="liveLogs" class="live-logs"></div>
+          </article>
+
+          <article class="audit-panel evidence-panel" id="evidence-audit" role="tabpanel" aria-labelledby="tab-audit" data-evidence-panel="audit" hidden>
+            <div class="panel-heading"><p class="eyebrow">Audit log</p><span>Persisted runtime entries</span></div>
+            <div id="auditRows" class="audit-rows"></div>
+          </article>
+
+          <article class="trace-panel evidence-panel" id="evidence-timeline" role="tabpanel" aria-labelledby="tab-timeline" data-evidence-panel="timeline" hidden>
+            <div class="panel-heading"><p class="eyebrow">Execution timeline</p><span>Recorded order</span></div>
+            <div id="executionTimeline" class="trace-list"></div>
+          </article>
+
+          <article class="trace-panel evidence-panel" id="evidence-qwen" role="tabpanel" aria-labelledby="tab-qwen" data-evidence-panel="qwen" hidden>
+            <div class="panel-heading"><p class="eyebrow">Qwen conversation trace</p><span>Prompts and raw responses</span></div>
+            <div id="qwenTrace" class="trace-list"></div>
+          </article>
+
+          <article class="mcp-panel evidence-panel" id="evidence-connectors" role="tabpanel" aria-labelledby="tab-connectors" data-evidence-panel="connectors" hidden>
+            <div class="panel-heading"><p class="eyebrow">MCP connector registry</p><span>Live or simulated</span></div>
+            <div id="mcpGrid" class="mcp-grid"></div>
+          </article>
+
+          <article class="mcp-panel evidence-panel" id="evidence-mcp" role="tabpanel" aria-labelledby="tab-mcp" data-evidence-panel="mcp" hidden>
+            <div class="panel-heading"><p class="eyebrow">MCP activity</p><span>Request and response</span></div>
+            <div id="mcpTrace" class="mcp-trace"></div>
+          </article>
+
+          <article class="runs-panel evidence-panel" id="evidence-runs" role="tabpanel" aria-labelledby="tab-runs" data-evidence-panel="runs" hidden>
+            <div class="panel-heading"><p class="eyebrow">Persisted runs</p><span>JSONL audit store</span></div>
+            <div id="recentRuns" class="recent-runs"></div>
+          </article>
+        </section>
       </section>
 
-      <section class="trace-section">
-        <article class="trace-panel">
-          <div class="panel-heading">
-            <p class="eyebrow">Execution timeline</p>
-            <span>recorded order</span>
-          </div>
-          <div id="executionTimeline" class="trace-list"></div>
-        </article>
-
-        <article class="trace-panel">
-          <div class="panel-heading">
-            <p class="eyebrow">Qwen conversation trace</p>
-            <span>prompts and raw responses</span>
-          </div>
-          <div id="qwenTrace" class="trace-list"></div>
-        </article>
-      </section>
-
-      <section class="mcp-section">
-        <article class="mcp-panel">
-          <div class="panel-heading">
-          <p class="eyebrow">MCP connector registry</p>
-          <span>live or simulated</span>
-          </div>
-          <div id="mcpGrid" class="mcp-grid"></div>
-        </article>
-
-        <article class="mcp-panel">
-          <div class="panel-heading">
-          <p class="eyebrow">MCP activity</p>
-          <span>request and response</span>
-          </div>
-          <div id="mcpTrace" class="mcp-trace"></div>
-        </article>
-      </section>
-
-      <section class="runs-panel">
-        <div class="panel-heading">
-          <p class="eyebrow">Persisted runs</p>
-          <span>JSONL audit store</span>
-        </div>
-        <div id="recentRuns" class="recent-runs"></div>
-      </section>
-
-      <section class="bottom-drawer" aria-label="Prompt and response inspector">
+      <section class="bottom-drawer collapsed" data-page="evidence" aria-label="Prompt and response inspector">
         <div class="panel-heading">
           <p class="eyebrow">Prompt / Response / Raw JSON</p>
-          <span id="drawerStatus">select a Qwen call</span>
+          <div class="drawer-controls">
+            <span id="drawerStatus">Select a Qwen call</span>
+            <button id="drawerToggle" type="button" aria-controls="traceInspector" aria-expanded="false">Open inspector</button>
+          </div>
         </div>
         <div id="traceInspector" class="trace-inspector">Open a Qwen trace row to inspect exact prompt, response, usage, latency, and parsed output.</div>
       </section>
     </main>
 
-    <script type="module" src="/app.js?v=20260717-enterprise-console"></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>
