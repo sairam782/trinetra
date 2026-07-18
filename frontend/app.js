@@ -50,6 +50,9 @@ const els = {
   mcpTrace: document.querySelector("#mcpTrace"),
   executionTimeline: document.querySelector("#executionTimeline"),
   qwenTrace: document.querySelector("#qwenTrace"),
+  timelineStatus: document.querySelector("#timelineStatus"),
+  streamStatus: document.querySelector("#streamStatus"),
+  activeQwenStream: document.querySelector("#activeQwenStream"),
   recentRuns: document.querySelector("#recentRuns"),
   liveLogs: document.querySelector("#liveLogs"),
   logSearch: document.querySelector("#logSearch"),
@@ -64,6 +67,8 @@ let realtimeTimer = null;
 let logTimer = null;
 let lastRunData = null;
 let currentLogs = [];
+let liveTimelineEvents = [];
+let activeQwen = null;
 
 els.demoModeButton.addEventListener("click", () => setMode("demo"));
 els.realtimeModeButton.addEventListener("click", () => setMode("realtime"));
@@ -108,16 +113,23 @@ function setMode(mode) {
 
 async function runAgents() {
   setLoading(true);
+  const payload = {
+    incidentKey: els.incidentSelect.value,
+    approval: els.approvalSelect.value
+  };
   try {
     renderLoadingTrace();
-    const data = await fetchJson("/api/incidents/analyze", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        incidentKey: els.incidentSelect.value,
-        approval: els.approvalSelect.value
-      })
-    });
+    let data = null;
+    try {
+      data = await streamIncidentAnalysis(payload);
+    } catch (streamError) {
+      console.warn(streamError);
+      data = await fetchJson("/api/incidents/analyze", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    }
     render(data);
   } catch (error) {
     console.error(error);
@@ -128,6 +140,103 @@ async function runAgents() {
     setLoading(false);
     refreshLogs();
   }
+}
+
+async function streamIncidentAnalysis(payload) {
+  const response = await fetch("/api/incidents/analyze/stream", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok || !response.body) throw new Error(`stream failed: ${response.status}`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResult = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const messages = buffer.split(/\n\n+/);
+    buffer = messages.pop() || "";
+    for (const message of messages) {
+      const parsed = parseSseMessage(message);
+      if (!parsed) continue;
+      if (parsed.event === "complete") {
+        finalResult = parsed.data.result;
+        els.streamStatus.textContent = "complete";
+      } else if (parsed.event === "error") {
+        throw new Error(parsed.data.error || "stream error");
+      } else {
+        handleStreamEvent(parsed.event, parsed.data);
+      }
+    }
+  }
+  if (!finalResult) throw new Error("stream ended without final result");
+  return finalResult;
+}
+
+function parseSseMessage(message) {
+  const eventLine = message.split(/\n/).find((line) => line.startsWith("event:"));
+  const dataLines = message.split(/\n/).filter((line) => line.startsWith("data:"));
+  if (!eventLine || !dataLines.length) return null;
+  const event = eventLine.slice(6).trim();
+  const data = dataLines.map((line) => line.slice(5).trim()).join("\n");
+  try {
+    return { event, data: JSON.parse(data) };
+  } catch {
+    return null;
+  }
+}
+
+function handleStreamEvent(event, data) {
+  if (event === "connected") {
+    els.timelineStatus.textContent = "connected";
+    return;
+  }
+  const item = event === "timeline" ? data : { type: event, label: event, timestamp: data.timestamp, ...data };
+  if (item.type === "qwen_start") {
+    activeQwen = { role: item.role, model: item.model, text: "", chunks: 0 };
+    els.streamStatus.textContent = `${valueOrNA(item.role)} running`;
+    els.activeQwenStream.innerHTML = `
+      <div class="stream-meta">
+        <span>${escapeHtml(valueOrNA(item.role))}</span>
+        <strong>${escapeHtml(valueOrNA(item.model))}</strong>
+        <em>waiting for response</em>
+      </div>
+      <pre>Awaiting streamed response...</pre>
+    `;
+  }
+  if (item.type === "qwen_delta") {
+    if (!activeQwen || activeQwen.role !== item.role) activeQwen = { role: item.role, model: item.model, text: "", chunks: 0 };
+    activeQwen.text += item.chunk || "";
+    activeQwen.chunks += 1;
+    els.streamStatus.textContent = `${valueOrNA(item.role)} streaming`;
+    els.activeQwenStream.innerHTML = `
+      <div class="stream-meta">
+        <span>${escapeHtml(valueOrNA(activeQwen.role))}</span>
+        <strong>${escapeHtml(valueOrNA(activeQwen.model))}</strong>
+        <em>${activeQwen.chunks} chunks · ${activeQwen.text.length} chars</em>
+      </div>
+      <pre>${escapeHtml(activeQwen.text || "Receiving response...")}</pre>
+    `;
+    return;
+  }
+  if (item.type === "qwen_end") {
+    els.streamStatus.textContent = `${valueOrNA(item.role)} complete`;
+    if (item.qwenCall?.rawResponse) {
+      els.activeQwenStream.innerHTML = `
+        <div class="stream-meta">
+          <span>${escapeHtml(valueOrNA(item.role))}</span>
+          <strong>${escapeHtml(valueOrNA(item.qwenCall.model || item.model))}</strong>
+          <em>${escapeHtml(formatLatency(item.qwenCall.latencyMs))} · ${escapeHtml(formatTokens(item.qwenCall.usage))}</em>
+        </div>
+        <pre>${escapeHtml(item.qwenCall.rawResponse)}</pre>
+      `;
+    }
+  }
+  appendLiveTimelineEvent(item);
 }
 
 function render(data) {
@@ -170,6 +279,8 @@ function render(data) {
 }
 
 function renderLoadingTrace() {
+  liveTimelineEvents = [];
+  activeQwen = null;
   const loading = document.createElement("article");
   loading.className = "trace-empty thinking";
   loading.innerHTML = `<span>Thinking</span><i></i><i></i><i></i>`;
@@ -177,6 +288,9 @@ function renderLoadingTrace() {
   els.executionTimeline.replaceChildren(loading);
   els.traceInspector.textContent = "Waiting for runtime response from the backend.";
   els.drawerStatus.textContent = "running";
+  els.timelineStatus.textContent = "running";
+  els.streamStatus.textContent = "waiting";
+  els.activeQwenStream.textContent = "No streamed response yet.";
 }
 
 function renderRemediationTimeline(remediationPlan = {}, animate = false) {
@@ -446,22 +560,101 @@ function renderExecutionTimeline(events = [], animate = false) {
     els.executionTimeline.replaceChildren(emptyTrace("No execution timeline available"));
     return;
   }
-  const rows = events.map((event, index) => {
-    const details = document.createElement("details");
-    details.className = `trace-item ${animate ? "will-enter" : ""}`;
-    details.style.setProperty("--delay", `${Math.min(index, 24) * 45}ms`);
-    details.innerHTML = `
-      <summary>
-        <span>${escapeHtml(formatTime(event.timestamp))}</span>
-        <strong>${escapeHtml(valueOrNA(event.label))}</strong>
-        <em>${escapeHtml(valueOrNA(event.type))}</em>
-      </summary>
-      <pre>${escapeHtml(JSON.stringify(event, null, 2))}</pre>
-    `;
-    return details;
-  });
+  const rows = events.map((event, index) => createTimelineRow(event, { animate, index }));
   els.executionTimeline.replaceChildren(...rows);
   requestAnimationFrame(() => rows.forEach((row) => row.classList.remove("will-enter")));
+  els.timelineStatus.textContent = `${events.length} events`;
+}
+
+function appendLiveTimelineEvent(event) {
+  liveTimelineEvents.push(event);
+  const existingEmpty = els.executionTimeline.querySelector(".trace-empty");
+  if (existingEmpty) els.executionTimeline.replaceChildren();
+  const row = createTimelineRow(event, { animate: true, index: liveTimelineEvents.length - 1, live: true });
+  els.executionTimeline.append(row);
+  requestAnimationFrame(() => row.classList.remove("will-enter"));
+  els.timelineStatus.textContent = `${liveTimelineEvents.length} streamed`;
+  els.executionTimeline.scrollTop = els.executionTimeline.scrollHeight;
+}
+
+function createTimelineRow(event, { animate = false, index = 0, live = false } = {}) {
+  const details = document.createElement("details");
+  details.className = `trace-item timeline-row ${timelineTypeClass(event.type)} ${animate ? "will-enter" : ""}`;
+  details.style.setProperty("--delay", `${Math.min(index, 24) * 35}ms`);
+  const meta = timelineMeta(event);
+  details.innerHTML = `
+    <summary>
+      <span>${escapeHtml(formatTime(event.timestamp))}</span>
+      <strong>${escapeHtml(valueOrNA(event.label))}</strong>
+      <em>${escapeHtml(meta)}</em>
+    </summary>
+    <div class="timeline-body">
+      ${timelineKeyValues(event)}
+      ${timelineQwenSections(event)}
+      <section class="trace-block"><h3>Raw Event</h3><pre class="json-viewer">${syntaxHighlightJson(event)}</pre></section>
+    </div>
+  `;
+  if (live && ["qwen_start", "tool_started"].includes(event.type)) details.open = true;
+  return details;
+}
+
+function timelineTypeClass(type) {
+  if (/qwen/i.test(type || "")) return "ai";
+  if (/tool|mcp/i.test(type || "")) return "tool";
+  if (/verification|completed|run_started/i.test(type || "")) return "success";
+  if (/error|failed|attention|rollback/i.test(type || "")) return "error";
+  if (/gate|approval|start|selected|running/i.test(type || "")) return "pending";
+  return "inactive";
+}
+
+function timelineMeta(event) {
+  const parts = [valueOrNA(event.type)];
+  const model = event.model || event.qwenCall?.model || event.auditEntry?.model;
+  const latency = event.latencyMs ?? event.qwenCall?.latencyMs ?? event.auditEntry?.latencyMs ?? event.toolExecution?.latencyMs ?? event.mcp?.latencyMs;
+  const tokens = event.tokens || event.qwenCall?.usage || event.auditEntry?.tokens;
+  const tool = event.toolCall?.name || event.toolExecution?.name;
+  const mcp = event.mcp?.name || event.mcp?.id;
+  if (model) parts.push(model);
+  if (tool) parts.push(`${tool}()`);
+  if (mcp) parts.push(mcp);
+  const formattedLatency = formatLatency(latency);
+  if (formattedLatency !== "Not available") parts.push(formattedLatency);
+  const formattedTokens = formatTokens(tokens);
+  if (formattedTokens !== "Tokens not available") parts.push(formattedTokens);
+  return parts.join(" · ");
+}
+
+function timelineKeyValues(event) {
+  const items = [
+    ["Type", event.type],
+    ["Status", event.status || event.verification?.status || event.toolExecution?.result?.message],
+    ["Model", event.model || event.qwenCall?.model || event.auditEntry?.model],
+    ["Latency", formatLatency(event.latencyMs ?? event.qwenCall?.latencyMs ?? event.auditEntry?.latencyMs ?? event.toolExecution?.latencyMs ?? event.mcp?.latencyMs)],
+    ["Tokens", formatTokens(event.tokens || event.qwenCall?.usage || event.auditEntry?.tokens)],
+    ["Tool", event.toolCall?.name || event.toolExecution?.name],
+    ["MCP", event.mcp?.name || event.mcp?.id],
+    ["Verification", event.verification?.status || event.result?.status]
+  ].filter(([, value]) => value && value !== "Not available" && value !== "Tokens not available");
+  if (!items.length) return "";
+  return `<div class="timeline-kv">${items.map(([key, value]) => `<div><span>${escapeHtml(key)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join("")}</div>`;
+}
+
+function timelineQwenSections(event) {
+  const call = event.qwenCall || event.auditEntry?.qwenCall;
+  if (!call && !event.systemPrompt && !event.userPrompt && !event.chunk) return "";
+  const raw = call?.rawResponse || event.chunk || null;
+  return `
+    <details class="nested-inspector">
+      <summary>Prompt</summary>
+      <section class="trace-block"><h3>System Prompt</h3><pre>${escapeHtml(valueOrNA(call?.systemPrompt || event.systemPrompt))}</pre></section>
+      <section class="trace-block"><h3>User Prompt</h3><pre>${escapeHtml(valueOrNA(call?.userPrompt || event.userPrompt))}</pre></section>
+    </details>
+    <details class="nested-inspector">
+      <summary>Response</summary>
+      <section class="trace-block"><h3>Raw Response</h3><pre>${escapeHtml(valueOrNA(raw))}</pre></section>
+      <section class="trace-block"><h3>Parsed Response</h3><pre class="json-viewer">${syntaxHighlightJson(call?.parsedResponse || null)}</pre></section>
+    </details>
+  `;
 }
 
 function renderQwenTrace(trace = []) {
@@ -489,15 +682,15 @@ function renderQwenTrace(trace = []) {
       <section class="trace-block"><h3>System Prompt</h3><pre>${escapeHtml(valueOrNA(call.systemPrompt))}</pre></section>
       <section class="trace-block"><h3>User Prompt</h3><pre>${escapeHtml(valueOrNA(call.userPrompt))}</pre></section>
       <section class="trace-block"><h3>Raw Response</h3><pre>${escapeHtml(valueOrNA(call.rawResponse))}</pre></section>
-      <section class="trace-block"><h3>Parsed Response</h3><pre>${escapeHtml(JSON.stringify(call.parsedResponse ?? null, null, 2))}</pre></section>
-      <section class="trace-block"><h3>Runtime</h3><pre>${escapeHtml(JSON.stringify({
+      <section class="trace-block"><h3>Parsed Response</h3><pre class="json-viewer">${syntaxHighlightJson(call.parsedResponse ?? null)}</pre></section>
+      <section class="trace-block"><h3>Runtime</h3><pre class="json-viewer">${syntaxHighlightJson({
         provider: call.provider ?? null,
         finishReason: call.finishReason ?? null,
         usage: call.usage ?? null,
         latencyMs: call.latencyMs ?? null,
         timestamp: call.timestamp ?? null,
         error: call.error ?? null
-      }, null, 2))}</pre></section>
+      })}</pre></section>
     `;
     details.querySelectorAll("[data-copy]").forEach((button) => {
       button.addEventListener("click", (event) => {
@@ -533,7 +726,7 @@ function inspectQwenCall(call) {
     <section><h3>System Prompt</h3><pre>${escapeHtml(valueOrNA(call.systemPrompt))}</pre></section>
     <section><h3>User Prompt</h3><pre>${escapeHtml(valueOrNA(call.userPrompt))}</pre></section>
     <section><h3>Raw Response</h3><pre>${escapeHtml(valueOrNA(call.rawResponse))}</pre></section>
-    <section><h3>Parsed Response</h3><pre>${escapeHtml(JSON.stringify(call.parsedResponse ?? null, null, 2))}</pre></section>
+    <section><h3>Parsed Response</h3><pre class="json-viewer">${syntaxHighlightJson(call.parsedResponse ?? null)}</pre></section>
   `;
 }
 
@@ -796,4 +989,15 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function syntaxHighlightJson(value) {
+  const json = typeof value === "string" ? value : JSON.stringify(value ?? null, null, 2);
+  return escapeHtml(json).replace(/(&quot;(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\&])*?&quot;)(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?/g, (match, string, colon, keyword) => {
+    if (string) {
+      return colon ? `<span class="json-key">${string}</span>${colon}` : `<span class="json-string">${string}</span>`;
+    }
+    if (keyword) return `<span class="json-keyword">${keyword}</span>`;
+    return `<span class="json-number">${match}</span>`;
+  });
 }

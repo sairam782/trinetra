@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trinetra</title>
     <link rel="icon" type="image/png" href="/assets/trinetra-mark-128.png" />
-    <link rel="stylesheet" href="/styles.css?v=20260717-enterprise-console" />
+    <link rel="stylesheet" href="/styles.css?v=20260718-live-execution-2" />
   </head>
   <body>
     <main class="shell">
@@ -122,6 +122,25 @@
         <div><span>Route</span><strong id="routeText">--</strong></div>
       </section>
 
+      <section class="execution-workbench">
+        <article class="trace-panel primary-timeline">
+          <div class="panel-heading">
+            <p class="eyebrow">Live execution timeline</p>
+            <span id="timelineStatus">waiting</span>
+          </div>
+          <div id="executionTimeline" class="trace-list live-trace-list"></div>
+        </article>
+
+        <article class="trace-panel qwen-panel">
+          <div class="panel-heading">
+            <p class="eyebrow">Qwen stream and inspectors</p>
+            <span id="streamStatus">idle</span>
+          </div>
+          <div id="activeQwenStream" class="active-qwen-stream">No active Qwen call.</div>
+          <div id="qwenTrace" class="trace-list compact-trace-list"></div>
+        </article>
+      </section>
+
       <section class="grid">
         <aside class="incident-panel">
           <div class="panel-heading">
@@ -210,24 +229,6 @@
         </article>
       </section>
 
-      <section class="trace-section">
-        <article class="trace-panel">
-          <div class="panel-heading">
-            <p class="eyebrow">Execution timeline</p>
-            <span>recorded order</span>
-          </div>
-          <div id="executionTimeline" class="trace-list"></div>
-        </article>
-
-        <article class="trace-panel">
-          <div class="panel-heading">
-            <p class="eyebrow">Qwen conversation trace</p>
-            <span>prompts and raw responses</span>
-          </div>
-          <div id="qwenTrace" class="trace-list"></div>
-        </article>
-      </section>
-
       <section class="mcp-section">
         <article class="mcp-panel">
           <div class="panel-heading">
@@ -263,6 +264,6 @@
       </section>
     </main>
 
-    <script type="module" src="/app.js?v=20260717-enterprise-console"></script>
+    <script type="module" src="/app.js?v=20260718-live-execution-2"></script>
   </body>
 </html>

@@ -602,6 +602,55 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/incidents/analyze/stream") {
+      const body = await readJson(req);
+      res.writeHead(200, securityHeaders({
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-store",
+        "connection": "keep-alive",
+        "x-accel-buffering": "no"
+      }, requestId));
+      const emit = (event, payload = {}) => {
+        res.write(`event: ${event}\n`);
+        res.write(`data: ${JSON.stringify({ requestId, ...payload })}\n\n`);
+      };
+      try {
+        emit("connected", { timestamp: new Date().toISOString() });
+        void logger.info("incident_stream_started", {
+          requestId,
+          incidentKey: body.incidentKey,
+          approval: body.approval
+        }).catch(() => {});
+        const result = await orchestrateIncident(validateAnalyzeRequest(body), requestId, { emit });
+        await persistRun(result);
+        void logger.info("incident_stream_completed", {
+          requestId,
+          runId: result.runId,
+          incidentId: result.incident.id,
+          service: result.incident.service,
+          severity: result.commander.severity,
+          gate: result.gate.kind,
+          verification: result.verification.status,
+          qwenLive: result.qwen.runtime.liveEnabled,
+          calls: result.totals.calls
+        }).catch(() => {});
+        emit("complete", { timestamp: new Date().toISOString(), result });
+      } catch (streamError) {
+        void logger.error("incident_stream_error", {
+          requestId,
+          message: streamError?.message || "Stream failed",
+          stack: streamError?.stack
+        }).catch(() => {});
+        emit("error", {
+          timestamp: new Date().toISOString(),
+          error: streamError?.message || "Unexpected stream error"
+        });
+      } finally {
+        res.end();
+      }
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/demo-store") {
       const html = renderDemoStore();
       res.writeHead(demoSiteStatus().httpStatus, securityHeaders({
@@ -1039,7 +1088,8 @@ function buildWebsiteIncident() {
   };
 }
 
-async function orchestrateIncident({ incidentKey = "latency", requestedApproval = "pending" }, requestId = crypto.randomUUID()) {
+async function orchestrateIncident({ incidentKey = "latency", requestedApproval = "pending" }, requestId = crypto.randomUUID(), options = {}) {
+  const emit = options.emit || null;
   const approvalState = resolveSignedApproval(incidentKey);
   const approval = approvalState.approval;
   const approverId = approvalState.approverId;
@@ -1047,6 +1097,13 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
   const runStartedAt = new Date().toISOString();
   const audit = [];
   const mcpTrace = [];
+  emitStreamEvent(emit, "run_started", "Run started", {
+    incidentId: incident.id,
+    service: incident.service,
+    incidentKey,
+    requestedApproval,
+    timestamp: runStartedAt
+  });
   const dedupe = correlateIncident(incident);
 
   const ingestion = logCall(audit, "Ingest and correlate", {
@@ -1057,10 +1114,11 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
     reasoning: dedupe.reason,
     mcp: useMcp(mcpTrace, "alerts", "deduplicate", `${incident.id} grouped by service and region`)
   });
+  emitAuditEntry(emit, ingestion);
 
-  const commander = await runCommander(incident);
+  const commander = await runCommander(incident, { emit });
   const route = routeIncident(commander, dedupe);
-  logCall(audit, "Commander agent", {
+  emitAuditEntry(emit, logCall(audit, "Commander agent", {
     input: ingestion.output,
     output: `${commander.severity} assigned; ${route.name}`,
     confidence: commander.confidence,
@@ -1071,17 +1129,18 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
     branch: route.name,
     qwenCall: commander.qwenCall,
     mcp: useMcp(mcpTrace, "tickets", "create_incident", `${incident.id} severity field set to ${commander.severity}`)
-  });
+  }));
+  emitStreamEvent(emit, "route_selected", "Route selected", { route, commander });
 
   const [logs, metrics, traces, memory] = await Promise.all([
-    runLogsAgent(incident, mcpTrace),
-    runMetricsAgent(incident, mcpTrace),
-    route.fastPath ? Promise.resolve(null) : runTraceAgent(incident, mcpTrace),
-    runMemoryAgent(incident, mcpTrace)
+    runLogsAgent(incident, mcpTrace, { emit }),
+    runMetricsAgent(incident, mcpTrace, { emit }),
+    route.fastPath ? Promise.resolve(null) : runTraceAgent(incident, mcpTrace, { emit }),
+    runMemoryAgent(incident, mcpTrace, { emit })
   ]);
   const specialists = [logs, metrics, traces, memory].filter(Boolean);
   if (route.fastPath) {
-    logCall(audit, "Fast-path notification", {
+    emitAuditEntry(emit, logCall(audit, "Fast-path notification", {
       input: `${incident.id} ${commander.severity}`,
       output: "Immediate Slack/PagerDuty notification sent before full enrichment",
       confidence: 0.92,
@@ -1091,11 +1150,11 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
       branch: route.name,
       reasoning: "P1 incidents trade enrichment depth for notification speed",
       mcp: useMcp(mcpTrace, "pager", "page_oncall", "paged primary on-call for P1")
-    });
+    }));
   }
 
   for (const result of specialists) {
-    logCall(audit, result.agent, {
+    emitAuditEntry(emit, logCall(audit, result.agent, {
       input: incident.id,
       output: result.finding,
       confidence: result.confidence,
@@ -1106,11 +1165,11 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
       reasoning: result.reasoning,
       qwenCall: result.qwenCall,
       mcp: result.mcp
-    });
+    }));
   }
 
   const adjudication = adjudicate(specialists, commander);
-  logCall(audit, "Negotiation and adjudication", {
+  emitAuditEntry(emit, logCall(audit, "Negotiation and adjudication", {
     input: "specialist findings",
     output: adjudication.rootCause,
     confidence: adjudication.confidence,
@@ -1119,12 +1178,12 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
     tokens: tokenUsage(adjudication.negotiation.join(" "), adjudication.rootCause),
     reasoning: adjudication.reasoning,
     branch: route.name
-  });
+  }));
 
   const fallbackRunbook = selectRunbook(incident, adjudication);
-  const triage = await runTriageAgent(incident, adjudication, commander, fallbackRunbook);
+  const triage = await runTriageAgent(incident, adjudication, commander, fallbackRunbook, { emit });
   const runbook = triage.runbook;
-  logCall(audit, "Triage agent", {
+  emitAuditEntry(emit, logCall(audit, "Triage agent", {
     input: adjudication.rootCause,
     output: `${runbook.id}: ${runbook.title}`,
     confidence: triage.confidence,
@@ -1135,9 +1194,10 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
     reasoning: triage.reasoning,
     qwenCall: triage.qwenCall,
     mcp: useMcp(mcpTrace, "memory", "semantic_search", `${runbook.id} matched for ${incident.service}`)
-  });
+  }));
 
   const gate = chooseGate(commander, runbook, triage, approval, approverId);
+  emitStreamEvent(emit, "gate_decided", "Remediation gate decided", { gate });
   let approvalMcp = null;
   if (gate.kind === "human") {
     registerPendingApprovalTimeout(incidentKey, incident, gate, requestId);
@@ -1151,7 +1211,7 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
       trace: mcpTrace
     });
   }
-  logCall(audit, "Remediation gate", {
+  emitAuditEntry(emit, logCall(audit, "Remediation gate", {
     input: `${commander.severity}, ${runbook.risk} risk, requestedApproval=${requestedApproval}, signedApproval=${approval}`,
     output: gate.label,
     confidence: gate.confidence,
@@ -1161,10 +1221,10 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
     branch: gate.kind,
     reasoning: gate.reason,
     mcp: approvalMcp || useMcp(mcpTrace, gate.kind === "auto" || gate.kind === "approved" ? "deploy" : "chat", gate.kind === "auto" || gate.kind === "approved" ? gate.deployAction : "request_approval", gate.action)
-  });
+  }));
 
-  const remediationPlan = await runRemediationAgent(incident, triage, gate, specialists);
-  logCall(audit, "AI remediation agent", {
+  const remediationPlan = await runRemediationAgent(incident, triage, gate, specialists, { emit });
+  emitAuditEntry(emit, logCall(audit, "AI remediation agent", {
     input: `${gate.label}; ${triage.runbook.id}`,
     output: remediationPlan.summary,
     confidence: remediationPlan.confidence,
@@ -1176,10 +1236,11 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
     branch: remediationPlan.status,
     qwenCall: remediationPlan.qwenCall,
     mcp: useMcp(mcpTrace, "deploy", "execute_tool_sequence", remediationPlan.toolsExecuted.map((tool) => tool.name).join(" -> ") || "none")
-  });
+  }));
 
   const verification = verifyOutcome(incident, gate, remediationPlan);
-  logCall(audit, "Verification and rollback", {
+  emitStreamEvent(emit, "verification", "Verification", { verification });
+  emitAuditEntry(emit, logCall(audit, "Verification and rollback", {
     input: gate.label,
     output: verification.status,
     confidence: verification.confidence,
@@ -1187,19 +1248,19 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
     reasoning: verification.reason,
     branch: verification.rollbackTriggered ? "rollback" : "verify",
     mcp: useMcp(mcpTrace, "metrics", "query_range", "checked recovery indicators after gate decision")
-  });
+  }));
   if (verification.rollbackTriggered) {
-    logCall(audit, "Rollback executor", {
+    emitAuditEntry(emit, logCall(audit, "Rollback executor", {
       input: gate.runbook?.rollback || "rollback unavailable",
       output: verification.rollbackStatus,
       confidence: 0.86,
       cost: 0.004,
       reasoning: "Verification failed before timeout, so supported rollback was invoked and on-call was escalated",
       mcp: useMcp(mcpTrace, "deploy", "rollback_deploy", verification.rollbackStatus)
-    });
+    }));
   }
 
-  logCall(audit, "Communication agent", {
+  emitAuditEntry(emit, logCall(audit, "Communication agent", {
     input: verification.status,
     output: buildStatusUpdate(incident, commander, gate, verification),
     confidence: 0.92,
@@ -1207,10 +1268,10 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
     model: qwenModels.communication,
     tokens: tokenUsage(verification.status, incident.customerImpact),
     mcp: useMcp(mcpTrace, "chat", "post_update", "posted status to incident channel")
-  });
+  }));
 
   if (!route.fastPath || verification.status.includes("verified")) {
-    logCall(audit, "Documentation agent", {
+    emitAuditEntry(emit, logCall(audit, "Documentation agent", {
       input: "full reasoning trace",
       output: `Created incident timeline with ${audit.length + 1} agent entries`,
       confidence: 0.96,
@@ -1219,19 +1280,19 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
       tokens: tokenUsage(audit.map((item) => item.output).join(" "), "postmortem timeline"),
       reasoning: "Long-form postmortem writing uses qwen3.6-plus",
       mcp: useMcp(mcpTrace, "docs", "write_timeline", "published reasoning trail draft")
-    });
+    }));
   }
 
   const memoryUpdate = buildMemoryUpdate(incident, commander, adjudication, gate, verification);
 
-  logCall(audit, "Feedback to memory", {
+  emitAuditEntry(emit, logCall(audit, "Feedback to memory", {
     input: verification.status,
     output: `Stored outcome under ${incident.service} with remediation=${gate.kind}`,
     confidence: 0.95,
     cost: 0.002,
     reasoning: "Closed-loop memory update makes future historical-memory retrieval stronger",
     mcp: useMcp(mcpTrace, "memory", "store_outcome", `${incident.id} outcome indexed for retrieval`)
-  });
+  }));
 
   return {
     incident,
@@ -1397,12 +1458,33 @@ function routeIncident(commander, dedupe) {
   return { name: "P2-P4 standard", fastPath: false, reason: "Severity allows full specialist enrichment before remediation gate" };
 }
 
-async function runQwenAgent(role, input, buildOutput) {
+async function runQwenAgent(role, input, buildOutput, options = {}) {
+  const emit = options.emit || null;
   const model = qwenModels[role] || qwenModels.triage;
   const forcedFailure = process.env.FORCE_QWEN_FAILURE_ROLE === role || process.env.FORCE_QWEN_FAILURE_ROLE === "all";
   const fallback = buildOutput();
   if (forcedFailure) {
     const forcedStartedAt = new Date().toISOString();
+    emitStreamEvent(emit, "qwen_start", `${role} Qwen call started`, { role, model, provider: "local-fallback" });
+    emitStreamEvent(emit, "qwen_end", `${role} Qwen fallback completed`, {
+      role,
+      model,
+      provider: "local-fallback",
+      qwenCall: {
+        role,
+        model,
+        provider: "local-fallback",
+        systemPrompt: null,
+        userPrompt: null,
+        rawResponse: null,
+        parsedResponse: fallback,
+        usage: null,
+        finishReason: null,
+        timestamp: forcedStartedAt,
+        latencyMs: 0,
+        error: "Forced local fallback"
+      }
+    });
     return {
       ...fallback,
       model,
@@ -1428,18 +1510,32 @@ async function runQwenAgent(role, input, buildOutput) {
   }
   const systemPrompt = "You are Trinetra, a production incident-response agent. Return compact JSON only. Preserve numeric confidence fields between 0 and 1.";
   const userPrompt = buildAgentPrompt(role, input, fallback);
+  emitStreamEvent(emit, "qwen_start", `${role} Qwen call started`, {
+    role,
+    model,
+    systemPrompt,
+    userPrompt
+  });
   const output = await qwenChatJson({
     role,
     model,
     system: systemPrompt,
     prompt: userPrompt,
-    fallback
+    fallback,
+    onToken: emit ? (chunk, meta = {}) => {
+      emitStreamEvent(emit, "qwen_delta", `${role} Qwen response streaming`, {
+        role,
+        model,
+        chunk,
+        timestamp: meta.timestamp || new Date().toISOString()
+      });
+    } : null
   });
   const stableOutput = {
     ...output,
     agent: fallback.agent || output.agent
   };
-  return {
+  const response = {
     ...stableOutput,
     model,
     tokens: stableOutput.usage ? {
@@ -1464,6 +1560,16 @@ async function runQwenAgent(role, input, buildOutput) {
       error: null
     }
   };
+  emitStreamEvent(emit, "qwen_end", `${role} Qwen call completed`, {
+    role,
+    model,
+    provider: response.provider || response.qwenCall?.provider || "unknown",
+    latencyMs: response.latencyMs,
+    tokens: response.tokens,
+    finishReason: response.finishReason,
+    qwenCall: response.qwenCall
+  });
+  return response;
 }
 
 function buildAgentPrompt(role, input, fallback) {
@@ -1708,6 +1814,37 @@ function buildRealtimeEvents(latest) {
   }));
 }
 
+function emitStreamEvent(emit, type, label, payload = {}) {
+  if (typeof emit !== "function") return;
+  emit("timeline", {
+    type,
+    label,
+    timestamp: payload.timestamp || new Date().toISOString(),
+    ...payload
+  });
+}
+
+function emitAuditEntry(emit, entry) {
+  emitStreamEvent(emit, entry.qwenCall ? "qwen" : "step", entry.agent, {
+    auditEntry: entry,
+    output: entry.output ?? null,
+    confidence: entry.confidence ?? null,
+    latencyMs: entry.latencyMs ?? null,
+    model: entry.model ?? null,
+    tokens: entry.tokens ?? null,
+    mcp: entry.mcp ?? null
+  });
+  if (entry.mcp) {
+    emitStreamEvent(emit, "mcp", entry.mcp.name || entry.mcp.id || "MCP", {
+      mcp: entry.mcp,
+      request: entry.mcp.request || `${entry.mcp.action}()`,
+      response: entry.mcp.response || entry.mcp.result || null,
+      latencyMs: entry.mcp.latencyMs ?? null,
+      status: entry.mcp.status || null
+    });
+  }
+}
+
 function shutdown(signal) {
   void logger.info("server_shutdown_requested", { signal }).catch(() => {});
   console.log(`${signal} received; closing Trinetra server`);
@@ -1723,7 +1860,7 @@ function shutdown(signal) {
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-async function runCommander(incident) {
+async function runCommander(incident, options = {}) {
   const errorRate = incident.metrics.errorRate || 0;
   const severeImpact = /payments|cannot|global/i.test(incident.customerImpact);
   const severity = errorRate > 12 || severeImpact ? "P1" : errorRate > 2 || incident.metrics.diskUsedPct > 90 ? "P2" : "P3";
@@ -1733,11 +1870,11 @@ async function runCommander(incident) {
     blastRadius: incident.metrics.affectedRegions.includes("global") ? "global" : incident.metrics.affectedRegions.join(", "),
     confidence: severity === "P1" ? 0.93 : 0.88,
     reasoning: `Severity based on error rate ${errorRate}% and impact: ${incident.customerImpact}`
-  }));
+  }), options);
   return result;
 }
 
-async function runLogsAgent(incident, trace) {
+async function runLogsAgent(incident, trace, options = {}) {
   const joined = incident.logs.join("\n");
   let finding = "No dominant log signature found";
   if (/pool exhausted|retry storm/i.test(joined)) finding = "Database pool exhaustion amplified by retry storm";
@@ -1752,10 +1889,10 @@ async function runLogsAgent(incident, trace) {
     evidence: incident.logs.slice(1, 4),
     reasoning: "Pattern extraction over correlated log lines",
     mcp: useMcp(trace, "logs", "search_logs", `matched ${incident.logs.length} relevant log lines`)
-  }));
+  }), options);
 }
 
-async function runMetricsAgent(incident, trace) {
+async function runMetricsAgent(incident, trace, options = {}) {
   const m = incident.metrics;
   let finding = "Metrics show elevated saturation without clear causal signal";
   if (m.p95LatencyMs > 1500 && m.saturation > 85) finding = `Saturation ${m.saturation}% aligns with latency ${m.p95LatencyMs}ms`;
@@ -1770,10 +1907,10 @@ async function runMetricsAgent(incident, trace) {
     evidence: m,
     reasoning: "Anomaly scoring over incident metrics and deploy timing",
     mcp: useMcp(trace, "metrics", "detect_anomaly", "scored metric deviations against recent baseline")
-  }));
+  }), options);
 }
 
-async function runTraceAgent(incident, trace) {
+async function runTraceAgent(incident, trace, options = {}) {
   let finding = "Trace spans show downstream dependency latency but no single failing span";
   if (incident.service === "checkout-api") finding = "Slowest span is checkout-api -> checkout-db acquire_connection";
   if (incident.service === "orders-db") finding = "Trace fanout points to reporting query temp-file pressure";
@@ -1787,10 +1924,10 @@ async function runTraceAgent(incident, trace) {
     evidence: "critical path sampled from correlated traces",
     reasoning: "Trace critical path analysis with fastest Qwen tier",
     mcp: useMcp(trace, "traces", "find_slowest_span", finding)
-  }));
+  }), options);
 }
 
-async function runMemoryAgent(incident, trace) {
+async function runMemoryAgent(incident, trace, options = {}) {
   const storeMatches = readMemorySnapshot().filter((item) => item.service === incident.service);
   const match = storeMatches.at(-1) || historicalCases.find((item) => item.service === incident.service) || historicalCases[0];
   return runQwenAgent("memory", { service: incident.service, match }, () => ({
@@ -1801,7 +1938,7 @@ async function runMemoryAgent(incident, trace) {
     evidence: match.fix || match.remediation || "previous incident outcome",
     reasoning: "Queried structured memory store before triage",
     mcp: useMcp(trace, "memory", "semantic_search", `${match.id} retrieved as nearest past case`)
-  }));
+  }), options);
 }
 
 function adjudicate(results, commander) {
@@ -1839,7 +1976,7 @@ function selectRunbook(incident, adjudication) {
   return runbooks.find((book) => (book.service === incident.service || book.service === "*") && book.match.some((term) => corpus.includes(term))) || noMatchRunbook;
 }
 
-async function runTriageAgent(incident, adjudication, commander, fallbackRunbook) {
+async function runTriageAgent(incident, adjudication, commander, fallbackRunbook, options = {}) {
   const runbookCatalog = [...runbooks, noMatchRunbook];
   const fallback = {
     rootCause: adjudication.rootCause,
@@ -1853,7 +1990,7 @@ async function runTriageAgent(incident, adjudication, commander, fallbackRunbook
     adjudication,
     commander,
     runbooks: runbookCatalog.map(({ id, title, service, risk, actionType, match, steps }) => ({ id, title, service, risk, actionType, match, steps }))
-  }, () => fallback);
+  }, () => fallback, options);
   const selected = runbookCatalog.find((book) => book.id === result.matchedRunbookId) || fallbackRunbook || noMatchRunbook;
   return {
     rootCause: String(result.rootCause || fallback.rootCause),
@@ -1869,9 +2006,9 @@ async function runTriageAgent(incident, adjudication, commander, fallbackRunbook
   };
 }
 
-async function runRemediationAgent(incident, triage, gate, specialists = []) {
+async function runRemediationAgent(incident, triage, gate, specialists = [], options = {}) {
   if (gate.deployAction === "restore_website_config") {
-    return runToolCallingRemediationAgent(incident, triage, gate, specialists);
+    return runToolCallingRemediationAgent(incident, triage, gate, specialists, options);
   }
 
   const failure = incident.demoFailure || null;
@@ -1908,7 +2045,7 @@ async function runRemediationAgent(incident, triage, gate, specialists = []) {
     },
     allowedActions,
     instruction: "Pick exactly one allowed action. Do not invent shell commands, credentials, external calls, or unlisted fixes."
-  }, () => fallback);
+  }, () => fallback, options);
   const validated = validateRemediationPlan(result, fallback, allowedActions, gate);
   return {
     ...validated,
@@ -1929,7 +2066,7 @@ async function runRemediationAgent(incident, triage, gate, specialists = []) {
   };
 }
 
-async function runToolCallingRemediationAgent(incident, triage, gate, specialists = []) {
+async function runToolCallingRemediationAgent(incident, triage, gate, specialists = [], options = {}) {
   const approvedByGate = ["auto", "approved"].includes(gate.kind);
   const fallback = buildFallbackToolPlan(incident, gate);
   if (!approvedByGate) {
@@ -1985,7 +2122,7 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
   let fallbackReason = null;
 
   for (let iteration = 0; iteration < 6; iteration += 1) {
-    const agentStep = await askRemediationToolAgent(incident, triage, gate, specialists, transcript, fallback);
+    const agentStep = await askRemediationToolAgent(incident, triage, gate, specialists, transcript, fallback, options);
     if (agentStep.qwenCall) qwenCalls.push(agentStep.qwenCall);
     provider = agentStep.provider || provider;
     fallbackReason = fallbackReason || agentStep.fallback || null;
@@ -2027,8 +2164,17 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
       }
 
       timeline.push({ status: "selected", label: `Selected tool: ${call.name}()`, detail: call.reason || "Qwen selected this registered backend tool" });
+      emitStreamEvent(options.emit, "tool_selected", `Selected tool: ${call.name}()`, {
+        toolCall: { name: call.name, args: call.args || {}, reason: call.reason || null },
+        decidedBy: "Qwen remediation agent"
+      });
       const toolStartedAt = new Date().toISOString();
       const toolStartedMs = Date.now();
+      emitStreamEvent(options.emit, "tool_started", `Running tool: ${call.name}()`, {
+        toolCall: { name: call.name, args: call.args || {}, reason: call.reason || null },
+        decidedBy: "Qwen remediation agent",
+        timestamp: toolStartedAt
+      });
       const result = remediationTools[call.name]({ incident, gate, triage, args: call.args || {} });
       const toolExecution = {
         name: call.name,
@@ -2043,6 +2189,10 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
       toolsExecuted.push(toolExecution);
       lastResult = result;
       timeline.push({ status: result.success === false || result.healthy === false ? "attention" : "completed", label: `Tool executed: ${call.name}()`, detail: result.message || JSON.stringify(result) });
+      emitStreamEvent(options.emit, "tool_completed", `Tool completed: ${call.name}()`, {
+        toolExecution,
+        status: result.success === false || result.healthy === false ? "attention" : "completed"
+      });
 
       if (call.name === "verify_demo" && result.healthy === false) {
         const rollback = runToolRollback({ incident, gate, triage, timeline, toolsExecuted, transcript });
@@ -2065,8 +2215,17 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
 
   if (!toolsExecuted.some((item) => item.name === "verify_demo")) {
     timeline.push({ status: "selected", label: "Selected tool: verify_demo()", detail: "Safety policy requires verification before finishing" });
+    emitStreamEvent(options.emit, "tool_selected", "Selected tool: verify_demo()", {
+      toolCall: { name: "verify_demo", args: {}, reason: "Safety policy requires verification before finishing" },
+      decidedBy: "Policy enforcement"
+    });
     const verifyStartedAt = new Date().toISOString();
     const verifyStartedMs = Date.now();
+    emitStreamEvent(options.emit, "tool_started", "Running tool: verify_demo()", {
+      toolCall: { name: "verify_demo", args: {}, reason: "Safety policy requires verification before finishing" },
+      decidedBy: "Policy enforcement",
+      timestamp: verifyStartedAt
+    });
     const verifyResult = remediationTools.verify_demo({ incident, gate, triage, args: {} });
     const verifyExecution = {
       name: "verify_demo",
@@ -2081,6 +2240,10 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
     toolsExecuted.push(verifyExecution);
     lastResult = verifyResult;
     timeline.push({ status: verifyResult.healthy ? "completed" : "attention", label: "Tool executed: verify_demo()", detail: verifyResult.message });
+    emitStreamEvent(options.emit, "tool_completed", "Tool completed: verify_demo()", {
+      toolExecution: verifyExecution,
+      status: verifyResult.healthy ? "completed" : "attention"
+    });
     if (!verifyResult.healthy) {
       finalResponse = {
         status: "verification_failed",
@@ -2115,7 +2278,7 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
   };
 }
 
-async function askRemediationToolAgent(incident, triage, gate, specialists, transcript, fallback) {
+async function askRemediationToolAgent(incident, triage, gate, specialists, transcript, fallback, options = {}) {
   const fallbackStep = nextFallbackToolStep(fallback, transcript);
   const result = await runQwenAgent("remediation", {
     incident: {
@@ -2143,7 +2306,7 @@ async function askRemediationToolAgent(incident, triage, gate, specialists, tran
       "Each toolCalls item must be { name, args, reason }.",
       "Do not hallucinate tools."
     ].join(" ")
-  }, () => fallbackStep);
+  }, () => fallbackStep, options);
   return {
     ...result,
     toolCalls: normalizeToolCalls(result.toolCalls || result.tools || result.tool_calls || fallbackStep.toolCalls)

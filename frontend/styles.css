@@ -495,6 +495,82 @@ button:disabled {
   padding: 10px;
 }
 
+.execution-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(380px, 0.75fr);
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.primary-timeline {
+  min-height: 620px;
+}
+
+.qwen-panel {
+  min-height: 620px;
+}
+
+.live-trace-list {
+  max-height: 790px;
+}
+
+.compact-trace-list {
+  max-height: 420px;
+}
+
+.active-qwen-stream {
+  min-height: 160px;
+  max-height: 260px;
+  overflow: auto;
+  margin-bottom: 10px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: #d8b4fe;
+  background: #090d18;
+  font-family: "SFMono-Regular", "IBM Plex Mono", Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.active-qwen-stream pre {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.stream-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 0.72rem;
+}
+
+.stream-meta strong,
+.stream-meta span,
+.stream-meta em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stream-meta strong {
+  color: var(--ai-soft);
+}
+
+.stream-meta em {
+  color: var(--muted);
+  font-style: normal;
+  text-align: right;
+}
+
 .grid {
   display: grid;
   grid-template-columns: minmax(270px, 0.78fr) minmax(520px, 1.42fr) minmax(330px, 0.92fr);
@@ -679,6 +755,43 @@ dd {
   background: var(--panel-2);
 }
 
+.timeline-row {
+  position: relative;
+}
+
+.timeline-row::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: rgb(148 163 184 / 35%);
+}
+
+.timeline-row.ai::before {
+  background: var(--ai);
+}
+
+.timeline-row.tool::before {
+  background: var(--tool);
+}
+
+.timeline-row.success::before {
+  background: var(--ok);
+}
+
+.timeline-row.pending::before {
+  background: var(--warn);
+}
+
+.timeline-row.error::before {
+  background: var(--bad);
+}
+
+.timeline-row[open] {
+  border-color: rgb(96 165 250 / 28%);
+  box-shadow: 0 10px 24px rgb(0 0 0 / 16%);
+}
+
 .trace-item summary {
   display: grid;
   grid-template-columns: 86px minmax(0, 1fr) minmax(170px, auto);
@@ -701,6 +814,59 @@ dd {
   white-space: nowrap;
 }
 
+.timeline-body {
+  border-top: 1px solid var(--line);
+}
+
+.timeline-kv {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px;
+}
+
+.timeline-kv div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0b1020;
+}
+
+.timeline-kv span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.timeline-kv strong {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+}
+
+.nested-inspector {
+  margin: 0 10px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0b1020;
+}
+
+.nested-inspector summary {
+  display: block;
+  padding: 9px 10px;
+  color: var(--soft);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
 .trace-item pre,
 .mcp-trace-row pre,
 .log-row pre {
@@ -709,6 +875,22 @@ dd {
   padding: 10px;
   border-top: 1px solid var(--line);
   background: #070b14;
+}
+
+.json-viewer .json-key {
+  color: #93c5fd;
+}
+
+.json-viewer .json-string {
+  color: #86efac;
+}
+
+.json-viewer .json-number {
+  color: #fbbf24;
+}
+
+.json-viewer .json-keyword {
+  color: #c4b5fd;
 }
 
 .trace-block h3,
@@ -1067,6 +1249,7 @@ dd {
 
 @media (max-width: 1280px) {
   .console-header,
+  .execution-workbench,
   .grid,
   .lower-grid,
   .trace-section,
@@ -1092,6 +1275,7 @@ dd {
   .prod-strip,
   .incident-context,
   .hero-stats,
+  .timeline-kv,
   .metric-delta,
   .mcp-grid,
   .pipeline-grid,

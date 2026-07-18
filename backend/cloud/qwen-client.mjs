@@ -10,7 +10,7 @@ export function qwenRuntimeConfig(env = process.env) {
   };
 }
 
-export async function qwenChatJson({ role, model, system, prompt, fallback, env = process.env }) {
+export async function qwenChatJson({ role, model, system, prompt, fallback, env = process.env, onToken = null }) {
   const config = qwenRuntimeConfig(env);
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
@@ -57,13 +57,31 @@ export async function qwenChatJson({ role, model, system, prompt, fallback, env 
             { role: "user", content: prompt }
           ],
           temperature: 0.2,
-          response_format: { type: "json_object" }
+          response_format: { type: "json_object" },
+          ...(typeof onToken === "function" ? {
+            stream: true,
+            stream_options: { include_usage: true }
+          } : {})
         })
       }, config.timeoutMs);
 
       if (!response.ok) {
         const text = await response.text();
         throw new Error(`Qwen ${response.status}: ${text.slice(0, 500)}`);
+      }
+
+      if (typeof onToken === "function") {
+        return await readStreamingJsonResponse({
+          response,
+          role,
+          model,
+          system,
+          prompt,
+          fallback,
+          startedAt,
+          startedMs,
+          onToken
+        });
       }
 
       const payload = await response.json();
@@ -115,6 +133,68 @@ export async function qwenChatJson({ role, model, system, prompt, fallback, env 
       timestamp: startedAt,
       latencyMs: Date.now() - startedMs,
       error: `Qwen ${role} call failed: ${lastError?.message || "unknown error"}`
+    }
+  };
+}
+
+async function readStreamingJsonResponse({ response, role, model, system, prompt, fallback, startedAt, startedMs, onToken }) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  let usage = null;
+  let finishReason = null;
+
+  for await (const chunk of response.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const data = trimmed.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      let payload = null;
+      try {
+        payload = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (payload.usage) usage = payload.usage;
+      const choice = payload.choices?.[0] || null;
+      const delta = choice?.delta?.content || choice?.message?.content || "";
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
+      if (delta) {
+        content += delta;
+        onToken(delta, {
+          role,
+          model,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+  }
+
+  const parsed = parseJsonObject(content);
+  return {
+    ...fallback,
+    ...parsed,
+    provider: "qwen-live",
+    rawModelResponse: content,
+    usage,
+    finishReason,
+    qwenCall: {
+      role,
+      model,
+      provider: "qwen-live",
+      systemPrompt: system,
+      userPrompt: prompt,
+      rawResponse: content,
+      parsedResponse: parsed,
+      usage,
+      finishReason,
+      timestamp: startedAt,
+      latencyMs: Date.now() - startedMs,
+      error: null
     }
   };
 }
