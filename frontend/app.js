@@ -59,10 +59,22 @@ const els = {
   logSearch: document.querySelector("#logSearch"),
   logStatus: document.querySelector("#logStatus"),
   refreshLogsButton: document.querySelector("#refreshLogsButton"),
+  jumpToLiveButton: document.querySelector("#jumpToLiveButton"),
+  pipelineFlow: document.querySelector("#pipelineFlow"),
+  pipelineDetails: document.querySelector("#pipelineDetails"),
+  fastPathBranch: document.querySelector("#fastPathBranch"),
+  standardBranch: document.querySelector("#standardBranch"),
+  autoGateBranch: document.querySelector("#autoGateBranch"),
+  humanGateBranch: document.querySelector("#humanGateBranch"),
+  escalateGateBranch: document.querySelector("#escalateGateBranch"),
   traceInspector: document.querySelector("#traceInspector"),
   drawerStatus: document.querySelector("#drawerStatus")
 };
 
+const pipelineStages = ["ingest", "commander", "specialists", "adjudication", "triage", "gate", "verify", "done"];
+let selectedPipelineStage = "ingest";
+let pipelineSelectionManual = false;
+let pipelineSnapshot = null;
 let currentMode = "demo";
 let realtimeTimer = null;
 let logTimer = null;
@@ -70,17 +82,35 @@ let lastRunData = null;
 let currentLogs = [];
 let liveTimelineEvents = [];
 let activeQwen = null;
+let logAutoScroll = true;
 const initialIncidentKey = new URLSearchParams(window.location.search).get("incident");
 
 els.demoModeButton.addEventListener("click", () => setMode("demo"));
 els.realtimeModeButton.addEventListener("click", () => setMode("realtime"));
 els.runButton.addEventListener("click", runAgents);
-els.incidentSelect.addEventListener("change", runAgents);
-els.approvalSelect.addEventListener("change", runAgents);
+els.incidentSelect.addEventListener("change", resetPipelineForSelectionChange);
+els.approvalSelect.addEventListener("change", resetPipelineForSelectionChange);
 els.injectErrorButton.addEventListener("click", injectDemoError);
 els.solveWebsiteButton.addEventListener("click", solveWebsiteIncident);
 els.refreshLogsButton.addEventListener("click", refreshLogs);
 els.logSearch.addEventListener("input", () => renderLogs(currentLogs));
+els.jumpToLiveButton.addEventListener("click", () => {
+  logAutoScroll = true;
+  els.jumpToLiveButton.classList.add("hidden");
+  scrollLogsToBottom();
+});
+els.liveLogs.addEventListener("scroll", () => {
+  const distanceFromBottom = els.liveLogs.scrollHeight - els.liveLogs.clientHeight - els.liveLogs.scrollTop;
+  logAutoScroll = distanceFromBottom < 24;
+  els.jumpToLiveButton.classList.toggle("hidden", logAutoScroll);
+});
+els.pipelineFlow.addEventListener("click", (event) => {
+  const node = event.target.closest("[data-stage]");
+  if (!node) return;
+  selectedPipelineStage = node.dataset.stage;
+  pipelineSelectionManual = true;
+  renderPipelineDetails();
+});
 els.agentGraph.addEventListener("click", (event) => {
   const node = event.target.closest("[data-node]");
   if (node) inspectGraphNode(node.dataset.node);
@@ -91,7 +121,7 @@ if (initialIncidentKey && [...els.incidentSelect.options].some((option) => optio
   els.incidentSelect.value = initialIncidentKey;
   if (initialIncidentKey === "website") setMode("realtime");
 }
-runAgents();
+resetPipelineForSelectionChange();
 refreshOpsStatus();
 refreshDemoSiteStatus();
 refreshLogs();
@@ -199,6 +229,7 @@ function parseSseMessage(message) {
 function handleStreamEvent(event, data) {
   if (event === "connected") {
     els.timelineStatus.textContent = "connected";
+    updatePipelineFromStream({ type: "connected", label: "Stream connected", timestamp: new Date().toISOString() });
     return;
   }
   const item = event === "timeline" ? data : { type: event, label: event, timestamp: data.timestamp, ...data };
@@ -243,6 +274,7 @@ function handleStreamEvent(event, data) {
     }
   }
   appendLiveTimelineEvent(item);
+  updatePipelineFromStream(item);
 }
 
 function render(data) {
@@ -282,12 +314,298 @@ function render(data) {
   renderMcps(mcps);
   renderMcpTrace(mcpTrace);
   renderExecutionGraph(data);
+  renderLivePipeline(data);
   refreshRecentRuns();
+}
+
+function updatePipelineFromStream(event) {
+  const stage = stageForEvent(event);
+  const previous = pipelineSnapshot || {
+    mode: "running",
+    activeStage: "ingest",
+    route: null,
+    gateKind: null,
+    sourceEvents: [],
+    data: null
+  };
+  pipelineSnapshot = {
+    ...previous,
+    mode: "running",
+    activeStage: stage || previous.activeStage || "ingest",
+    sourceEvents: [...(previous.sourceEvents || []), event].slice(-120)
+  };
+  selectedPipelineStage = pipelineSnapshot.activeStage;
+  pipelineSelectionManual = false;
+  renderLivePipeline();
+}
+
+function renderLivePipeline(data = lastRunData) {
+  if (data) {
+    pipelineSnapshot = buildPipelineSnapshot(data);
+    if (!pipelineSelectionManual || !pipelineStages.includes(selectedPipelineStage)) {
+      selectedPipelineStage = pipelineSnapshot.activeStage || "ingest";
+    }
+  } else if (!pipelineSnapshot) {
+    pipelineSnapshot = {
+      mode: "idle",
+      activeStage: "ingest",
+      route: null,
+      gateKind: null,
+      sourceEvents: [],
+      data: null
+    };
+  }
+  const activeStage = pipelineSnapshot.activeStage || "ingest";
+  const activeIndex = pipelineStages.indexOf(activeStage);
+  els.pipelineFlow.querySelectorAll("[data-stage]").forEach((node) => {
+    const stage = node.dataset.stage;
+    const index = pipelineStages.indexOf(stage);
+    const state = index < activeIndex ? "done" : index === activeIndex ? "active" : "pending";
+    node.classList.remove("done", "active", "pending", "selected");
+    node.classList.add(state);
+    node.classList.toggle("selected", selectedPipelineStage === stage);
+    node.querySelector(".node-mark").textContent = state === "done" ? "✓" : state === "active" ? "●" : "";
+  });
+  els.pipelineFlow.querySelectorAll(".flow-line").forEach((line, index) => {
+    line.classList.toggle("filled", index < activeIndex);
+    line.classList.toggle("active", index === Math.max(activeIndex - 1, 0) && pipelineSnapshot.mode === "running");
+  });
+  renderRouteBranches(pipelineSnapshot);
+  renderGateBranches(pipelineSnapshot);
+  renderPipelineDetails();
+}
+
+function buildPipelineSnapshot(data) {
+  const verificationText = `${data.verification?.status || ""} ${data.verification?.message || ""}`;
+  const gateText = `${data.gate?.kind || ""} ${data.gate?.label || ""} ${verificationText}`;
+  const pausedAtGate = /human|approval|paused/i.test(gateText) && !/healthy|resolved|closed|success/i.test(verificationText);
+  const failed = /failed|unhealthy|rollback|escalate/i.test(verificationText);
+  let activeStage = "done";
+  if (pausedAtGate) activeStage = "gate";
+  else if (failed) activeStage = "verify";
+  else if (!data.verification) activeStage = "gate";
+  return {
+    mode: "complete",
+    activeStage,
+    route: data.route || null,
+    gateKind: data.gate?.kind || null,
+    sourceEvents: data.executionTimeline || [],
+    data
+  };
+}
+
+function stageForEvent(event = {}) {
+  const text = `${event.type || ""} ${event.label || ""} ${event.role || ""} ${event.agent || ""} ${event.toolCall?.name || ""} ${event.toolExecution?.name || ""}`.toLowerCase();
+  if (/completed|incident closed|run completed|memory update/.test(text)) return "done";
+  if (/verify|verification|verify_demo/.test(text)) return "verify";
+  if (/gate|approval|slack|remediation|tool|restore|restart|reload|pin_|clear_|enable_/.test(text)) return "gate";
+  if (/triage|runbook/.test(text)) return "triage";
+  if (/adjudicat|negotiat|root cause|winner/.test(text)) return "adjudication";
+  if (/logs|metrics|trace|memory|specialist/.test(text)) return "specialists";
+  if (/commander/.test(text)) return "commander";
+  if (/ingest|alert|incident|started|connected/.test(text)) return "ingest";
+  return pipelineSnapshot?.activeStage || "ingest";
+}
+
+function renderRouteBranches(snapshot) {
+  const routeText = `${snapshot.route?.name || snapshot.data?.commander?.routing || ""}`.toLowerCase();
+  const isFast = /fast|p1/.test(routeText);
+  const hasRoute = Boolean(routeText);
+  setBranchState(els.fastPathBranch, hasRoute ? (isFast ? "taken" : "dead") : "pending");
+  setBranchState(els.standardBranch, hasRoute ? (isFast ? "dead" : "taken") : "pending");
+}
+
+function renderGateBranches(snapshot) {
+  const gate = `${snapshot.gateKind || snapshot.data?.gate?.kind || snapshot.data?.gate?.label || ""}`.toLowerCase();
+  const stateFor = (name) => {
+    if (!gate) return "pending";
+    if (name === "auto") return /auto/.test(gate) ? "taken" : "dead";
+    if (name === "human") return /human|approved|approval/.test(gate) ? "taken" : "dead";
+    if (name === "escalate") return /escalate|blocked|reject/.test(gate) ? "taken" : "dead";
+    return "pending";
+  };
+  setBranchState(els.autoGateBranch, stateFor("auto"));
+  setBranchState(els.humanGateBranch, stateFor("human"));
+  setBranchState(els.escalateGateBranch, stateFor("escalate"));
+}
+
+function setBranchState(element, state) {
+  element.classList.remove("pending", "taken", "dead");
+  element.classList.add(state);
+}
+
+function renderPipelineDetails() {
+  const snapshot = pipelineSnapshot || {};
+  const stage = selectedPipelineStage || snapshot.activeStage || "ingest";
+  const active = snapshot.activeStage || "ingest";
+  const data = snapshot.data;
+  const events = data ? nodeEvents(data, stage === "verify" ? "verification" : stage) : (snapshot.sourceEvents || []).filter((event) => stageForEvent(event) === stage);
+  const primary = stagePrimaryOutput(stage, data, events);
+  const qwenCalls = stageQwenCalls(stage, data);
+  const toolEvents = stageToolEvents(stage, data, events);
+  els.pipelineDetails.innerHTML = `
+    <div class="detail-head">
+      <div>
+        <span>${escapeHtml(stageLabel(stage))}${stage === active ? " · active" : ""}</span>
+        <strong>${escapeHtml(primary.title)}</strong>
+      </div>
+      <em>${escapeHtml(primary.meta)}</em>
+    </div>
+    <p>${escapeHtml(primary.body)}</p>
+    <div class="detail-grid">
+      ${primary.facts.map(([key, value]) => `<div><span>${escapeHtml(key)}</span><strong>${escapeHtml(valueOrNA(value))}</strong></div>`).join("")}
+    </div>
+    ${renderInlineInspectors(qwenCalls, toolEvents, events)}
+  `;
+}
+
+function stagePrimaryOutput(stage, data, events = []) {
+  const latest = events.at(-1) || {};
+  if (!data) {
+    return {
+      title: valueOrNA(latest.label || "Awaiting runtime output"),
+      body: valueOrNA(latest.detail || latest.message || latest.type || "The next streamed event will appear here."),
+      meta: timelineMeta(latest),
+      facts: [["Events", events.length ? String(events.length) : "Not available"]]
+    };
+  }
+  const stageMap = {
+    ingest: {
+      title: `${data.incident?.id || "Not available"} · ${data.incident?.service || "Not available"}`,
+      body: data.incident?.alert || "Not available",
+      meta: data.incident?.customerImpact || "Not available",
+      facts: [["Request", data.requestId], ["Run", data.runId], ["Mode", data.mode]]
+    },
+    commander: {
+      title: `${data.commander?.severity || "Not available"} · ${data.commander?.routing || "Not available"}`,
+      body: data.commander?.reasoning || "Not available",
+      meta: `Confidence ${formatPercent(data.commander?.confidence)}`,
+      facts: [["Blast radius", data.commander?.blastRadius], ["Route", data.route?.name], ["Model", data.qwen?.models?.commander]]
+    },
+    specialists: {
+      title: `${data.specialists?.length || 0} specialist outputs`,
+      body: data.specialists?.map((agent) => `${agent.agent}: ${agent.finding}`).join(" | ") || "Not available",
+      meta: "Logs · metrics · traces · memory",
+      facts: [["Agents", data.specialists?.length], ["Best confidence", bestSpecialistConfidence(data.specialists)], ["MCP calls", data.mcpTrace?.length]]
+    },
+    adjudication: {
+      title: data.adjudication?.rootCause || "Not available",
+      body: data.adjudication?.reasoning || "Not available",
+      meta: `Winner ${valueOrNA(data.adjudication?.winner)}`,
+      facts: [["Confidence", formatPercent(data.adjudication?.confidence)], ["Winner", data.adjudication?.winner], ["Events", events.length]]
+    },
+    triage: {
+      title: `${data.triage?.runbook?.id || "Not available"} · ${data.triage?.runbook?.title || "Not available"}`,
+      body: data.triage?.reasoning || "Not available",
+      meta: `Confidence ${formatPercent(data.triage?.confidence)}`,
+      facts: [["Risk", data.triage?.runbook?.risk], ["Approved", data.triage?.runbook?.approved], ["Steps", data.triage?.runbook?.steps?.length]]
+    },
+    gate: {
+      title: data.gate?.label || "Not available",
+      body: `${data.gate?.action || "Not available"} ${data.gate?.reason ? `Reason: ${data.gate.reason}` : ""}`,
+      meta: `Kind ${valueOrNA(data.gate?.kind)}`,
+      facts: [["Approval", data.gate?.kind], ["Runbook", data.triage?.runbook?.id], ["Tools", data.remediationPlan?.toolCalls?.length]]
+    },
+    verify: {
+      title: data.verification?.status || "Not available",
+      body: data.verification?.message || data.verification?.summary || "Not available",
+      meta: data.verification?.healthy === true ? "Healthy" : data.verification?.healthy === false ? "Unhealthy" : "Not available",
+      facts: [["Status", data.verification?.status], ["HTTP", data.verification?.statusCode || data.verification?.status], ["Rollback", data.remediationPlan?.rollback?.status]]
+    },
+    done: {
+      title: data.verification?.status || data.gate?.label || "Not available",
+      body: data.documentation?.summary || data.communication?.message || data.verification?.message || "Outcome recorded in audit log.",
+      meta: `${formatTokens(totalUsage(data.qwenTrace || []))} · ${data.audit?.length || 0} audit entries`,
+      facts: [["Run", data.runId], ["Qwen calls", data.qwenTrace?.length], ["Audit", data.audit?.length]]
+    }
+  };
+  return stageMap[stage] || stageMap.ingest;
+}
+
+function stageQwenCalls(stage, data) {
+  if (!data?.qwenTrace?.length) return [];
+  const match = {
+    commander: /commander/i,
+    specialists: /logs|metrics|trace|memory/i,
+    adjudication: /adjudication|negotiation/i,
+    triage: /triage/i,
+    gate: /remediation|communication/i,
+    verify: /verification/i,
+    done: /documentation|communication/i
+  }[stage];
+  return match ? data.qwenTrace.filter((call) => match.test(`${call.agent || ""} ${call.role || ""}`)) : [];
+}
+
+function stageToolEvents(stage, data, events = []) {
+  if (stage !== "gate" && stage !== "verify") return [];
+  const remediation = data?.remediationPlan?.timeline || [];
+  return [...remediation, ...events].filter((event) => /tool|restore|restart|reload|verify/i.test(`${event.type || ""} ${event.label || ""} ${event.name || ""}`));
+}
+
+function renderInlineInspectors(qwenCalls, toolEvents, events) {
+  const qwen = qwenCalls.slice(0, 3).map((call) => `
+    <details class="inline-inspector">
+      <summary>${escapeHtml(valueOrNA(call.agent || call.role))} · ${escapeHtml(valueOrNA(call.model))} · ${escapeHtml(formatLatency(call.latencyMs))}</summary>
+      <section><h3>System Prompt</h3><pre>${escapeHtml(valueOrNA(call.systemPrompt))}</pre></section>
+      <section><h3>User Prompt</h3><pre>${escapeHtml(valueOrNA(call.userPrompt))}</pre></section>
+      <section><h3>Raw Response</h3><pre>${escapeHtml(valueOrNA(call.rawResponse))}</pre></section>
+      <section><h3>Parsed Response</h3><pre>${syntaxHighlightJson(call.parsedResponse ?? null)}</pre></section>
+    </details>
+  `).join("");
+  const tools = toolEvents.slice(0, 5).map((event) => `
+    <details class="inline-inspector tool">
+      <summary>${escapeHtml(valueOrNA(event.label || event.name || event.toolExecution?.name || "Tool"))} · ${escapeHtml(valueOrNA(event.status || event.type))}</summary>
+      <pre>${syntaxHighlightJson(event)}</pre>
+    </details>
+  `).join("");
+  const receipts = events.slice(-4).map((event) => `
+    <div class="event-receipt">
+      <span>${escapeHtml(formatTime(event.timestamp))}</span>
+      <strong>${escapeHtml(valueOrNA(event.label || event.type))}</strong>
+      <em>${escapeHtml(timelineMeta(event))}</em>
+    </div>
+  `).join("");
+  return `
+    <div class="detail-inspectors">
+      ${qwen || tools ? qwen + tools : ""}
+      ${receipts ? `<section class="event-receipts">${receipts}</section>` : ""}
+    </div>
+  `;
+}
+
+function stageLabel(stage) {
+  return {
+    ingest: "Ingest",
+    commander: "Commander",
+    specialists: "Specialists",
+    adjudication: "Adjudication",
+    triage: "Triage",
+    gate: "Gate",
+    verify: "Verify",
+    done: "Done"
+  }[stage] || labelFor(stage);
+}
+
+function bestSpecialistConfidence(specialists = []) {
+  const values = specialists.map((agent) => agent.confidence).filter((value) => typeof value === "number");
+  if (!values.length) return "Not available";
+  return formatPercent(Math.max(...values));
 }
 
 function renderLoadingTrace() {
   liveTimelineEvents = [];
   activeQwen = null;
+  pipelineSnapshot = {
+    mode: "running",
+    activeStage: "ingest",
+    route: null,
+    gateKind: null,
+    sourceEvents: [],
+    data: null
+  };
+  selectedPipelineStage = "ingest";
+  pipelineSelectionManual = false;
+  renderLivePipeline();
   const loading = document.createElement("article");
   loading.className = "trace-empty thinking";
   loading.innerHTML = `<span>Thinking</span><i></i><i></i><i></i>`;
@@ -403,8 +721,9 @@ async function injectDemoError() {
   });
   els.incidentSelect.value = "website";
   els.approvalSelect.value = "pending";
+  resetPipelineForInjectedFailure();
   await refreshDemoSiteStatus();
-  await runAgents();
+  await refreshLogs();
 }
 
 async function solveWebsiteIncident() {
@@ -412,6 +731,56 @@ async function solveWebsiteIncident() {
   els.approvalSelect.value = "pending";
   await runAgents();
   await refreshDemoSiteStatus();
+}
+
+function resetPipelineForInjectedFailure() {
+  liveTimelineEvents = [];
+  activeQwen = null;
+  pipelineSelectionManual = false;
+  selectedPipelineStage = "ingest";
+  pipelineSnapshot = {
+    mode: "idle",
+    activeStage: "ingest",
+    route: null,
+    gateKind: null,
+    sourceEvents: [],
+    data: null
+  };
+  renderLivePipeline();
+  els.pipelineDetails.innerHTML = `
+    <div class="detail-empty">
+      <strong>Failure injected into target website</strong>
+      <span>Trinetra has not started. Click Run Trinetra pipeline to investigate and remediate.</span>
+    </div>
+  `;
+  els.timelineStatus.textContent = "waiting";
+  els.streamStatus.textContent = "idle";
+  els.activeQwenStream.textContent = "No active Qwen call.";
+}
+
+function resetPipelineForSelectionChange() {
+  liveTimelineEvents = [];
+  activeQwen = null;
+  pipelineSelectionManual = false;
+  selectedPipelineStage = "ingest";
+  pipelineSnapshot = {
+    mode: "idle",
+    activeStage: "ingest",
+    route: null,
+    gateKind: null,
+    sourceEvents: [],
+    data: null
+  };
+  renderLivePipeline();
+  els.pipelineDetails.innerHTML = `
+    <div class="detail-empty">
+      <strong>Pipeline idle</strong>
+      <span>Select an incident and click Run pipeline to start Trinetra.</span>
+    </div>
+  `;
+  els.timelineStatus.textContent = "waiting";
+  els.streamStatus.textContent = "idle";
+  els.activeQwenStream.textContent = "No active Qwen call.";
 }
 
 async function refreshRecentRuns() {
@@ -870,23 +1239,61 @@ function renderLogs(logs = []) {
   const filtered = logs.filter((entry) => {
     if (!query) return true;
     return JSON.stringify(entry).toLowerCase().includes(query);
-  }).slice(0, 80);
+  }).sort((a, b) => timestampValue(a.ts || a.timestamp || a.time) - timestampValue(b.ts || b.timestamp || b.time)).slice(-140);
   if (!filtered.length) {
     els.liveLogs.replaceChildren(emptyTrace("No log entries match the current filter"));
     return;
   }
   els.liveLogs.replaceChildren(...filtered.map((entry) => {
-    const row = document.createElement("article");
+    const row = document.createElement("details");
     const level = String(entry.level || entry.severity || "info").toLowerCase();
+    const tag = logTag(entry);
     row.className = `log-row ${level}`;
     row.innerHTML = `
-      <span>${escapeHtml(formatTime(entry.ts || entry.timestamp || entry.time))}</span>
-      <strong>${escapeHtml(level.toUpperCase())}</strong>
-      <code>${escapeHtml(entry.event || entry.message || "Not available")}</code>
+      <summary>
+        <time>${escapeHtml(formatTime(entry.ts || entry.timestamp || entry.time))}</time>
+        <strong>${escapeHtml(tag)}</strong>
+        <code>${escapeHtml(logMessage(entry))}</code>
+      </summary>
       <pre>${escapeHtml(JSON.stringify(entry, null, 2))}</pre>
     `;
     return row;
   }));
+  if (logAutoScroll) scrollLogsToBottom();
+}
+
+function scrollLogsToBottom() {
+  requestAnimationFrame(() => {
+    els.liveLogs.scrollTop = els.liveLogs.scrollHeight;
+    els.jumpToLiveButton.classList.add("hidden");
+  });
+}
+
+function timestampValue(value) {
+  if (!value) return 0;
+  const parsed = new Date(value).getTime();
+  if (!Number.isNaN(parsed)) return parsed;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric * 1000 : 0;
+}
+
+function logTag(entry) {
+  const raw = entry.agent || entry.role || entry.service || entry.event || entry.level || "runtime";
+  return String(raw).replace(/^trinetra-/, "").slice(0, 18);
+}
+
+function logMessage(entry) {
+  const event = entry.event || entry.message || "runtime_event";
+  const fragments = [];
+  if (entry.agent) fragments.push(entry.agent);
+  if (entry.model) fragments.push(entry.model);
+  if (entry.incidentId || entry.incidentKey) fragments.push(entry.incidentId || entry.incidentKey);
+  if (entry.status || entry.statusCode) fragments.push(entry.status || entry.statusCode);
+  if (entry.latencyMs !== undefined) fragments.push(formatLatency(entry.latencyMs));
+  if (entry.reasoning) fragments.push(entry.reasoning);
+  if (entry.error) fragments.push(entry.error);
+  if (entry.message && entry.message !== event) fragments.push(entry.message);
+  return `${event}${fragments.length ? ` → ${fragments.join(" · ")}` : ""}`;
 }
 
 function renderMetricDelta(before, after = {}) {
