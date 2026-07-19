@@ -1304,14 +1304,10 @@ dd {
 }
 
 .bottom-drawer {
-  position: sticky;
-  bottom: 0;
-  z-index: 15;
   max-height: 230px;
   overflow: auto;
   padding: 9px 10px;
-  background: color-mix(in srgb, var(--panel-steel) 94%, transparent);
-  backdrop-filter: blur(16px);
+  background: var(--panel);
   resize: vertical;
 }
 
@@ -1526,11 +1522,6 @@ dd {
 
   .trace-item summary {
     grid-template-columns: 1fr;
-  }
-
-  .bottom-drawer {
-    position: static;
-    max-height: 230px;
   }
 
   .inspector-scroll-grid {

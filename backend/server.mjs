@@ -51,6 +51,7 @@ const dedupeCache = new Map();
 const signedApprovals = new Map();
 const pendingApprovalTimers = new Map();
 const pendingApprovalTimeouts = new Map();
+const pendingSlackReactionTimers = new Map();
 const logger = createLogger({
   path: backendLogPath,
   consoleEnabled: process.env.LOG_TO_CONSOLE !== "false"
@@ -783,19 +784,21 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
 
   const payload = parseSlackPayload(rawBody, req.headers["content-type"]);
   const action = Array.isArray(payload.actions) ? payload.actions[0] : null;
-  const incidentKey = action?.value || payload.callback_id || payload.view?.private_metadata || "website";
+  const actionValue = parseSlackActionValue(action?.value);
+  const incidentKey = actionValue.incidentKey || payload.callback_id || payload.view?.private_metadata || "website";
   if (!incidents[incidentKey]) throw new HttpError(400, `Unknown incidentKey in Slack payload: ${incidentKey}`);
   const approverId = payload.user?.id || payload.user?.username || "unknown";
   if (!slackApproverAllowlist.includes(approverId)) throw new HttpError(403, `Slack approver is not allowlisted: ${approverId}`);
   const actionId = action?.action_id || null;
-  if (actionId === "open_trinetra_incident") {
+  const approvalRequestId = actionValue.requestId || requestId;
+  if (actionId === "open_trinetra_incident" || actionId === "open_incident") {
     return {
       incidentKey,
       approverId,
       state: "opened",
       source: "slack-signed",
       openedAt: new Date().toISOString(),
-      requestId,
+      requestId: approvalRequestId,
       actionId
     };
   }
@@ -806,7 +809,7 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
       state: "rejected",
       source: "slack-signed",
       rejectedAt: new Date().toISOString(),
-      requestId,
+      requestId: approvalRequestId,
       actionId
     };
     signedApprovals.set(incidentKey, rejected);
@@ -820,7 +823,7 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
     state: "approved",
     source: "slack-signed",
     approvedAt: new Date().toISOString(),
-    requestId,
+    requestId: approvalRequestId,
     actionId
   };
   signedApprovals.set(incidentKey, approval);
@@ -840,6 +843,16 @@ function slackInteractionResponseText(approval) {
     return `Opening Trinetra incident details for ${approval.incidentKey}.`;
   }
   return `Trinetra received Slack interaction for ${approval.incidentKey}.`;
+}
+
+function parseSlackActionValue(value) {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : { incidentKey: String(value) };
+  } catch {
+    return { incidentKey: String(value) };
+  }
 }
 
 function parseSlackPayload(rawBody, contentType = "") {
@@ -886,7 +899,10 @@ function slackApprovalStatus(env = process.env) {
     approvalChannelConfigured,
     approvalChannelId: approvalChannelConfigured ? slackApprovalChannelId : null,
     interactionEndpoint: publicBaseUrl ? `${publicBaseUrl.replace(/\/$/, "")}/api/slack/interactions` : "/api/slack/interactions",
+    approvalModes: ["reaction", "legacy-interaction"],
+    requiredBotScopes: ["chat:write", "reactions:read"],
     readyToPostApprovalRequests: liveRequested && botTokenConfigured && approvalChannelConfigured,
+    readyToPollReactions: liveRequested && botTokenConfigured,
     readyToVerifyInteractions: signingSecretConfigured
   };
 }
@@ -968,6 +984,14 @@ async function requestSlackApproval({ incidentKey, incident, commander, triage, 
     call.result = call.response;
     call.simulation = false;
     call.note = "Live Slack approval request posted";
+    if (call.response.ts) {
+      registerSlackReactionApprovalWatch({
+        incidentKey,
+        channel: call.response.channel,
+        ts: call.response.ts,
+        requestId
+      });
+    }
     void logger.info("slack_approval_request_sent", {
       requestId,
       incidentKey,
@@ -994,31 +1018,9 @@ async function requestSlackApproval({ incidentKey, incident, commander, triage, 
 
 function buildSlackApprovalMessage({ incidentKey, incident, commander, triage, gate, requestId }) {
   const consoleUrl = buildConsoleUrl(incidentKey);
-  const actionElements = [
-    {
-      type: "button",
-      text: { type: "plain_text", text: "Approve" },
-      style: "primary",
-      action_id: "approve_remediation",
-      value: incidentKey
-    },
-    {
-      type: "button",
-      text: { type: "plain_text", text: "Escalate" },
-      style: "danger",
-      action_id: "escalate_remediation",
-      value: incidentKey
-    }
-  ];
-  if (consoleUrl) {
-    actionElements.push({
-      type: "button",
-      text: { type: "plain_text", text: "Open incident" },
-      action_id: "open_trinetra_incident",
-      url: consoleUrl,
-      value: incidentKey
-    });
-  }
+  const detailText = consoleUrl
+    ? `Open details: <${consoleUrl}|Trinetra incident>`
+    : "Open details in Trinetra after PUBLIC_BASE_URL is configured.";
   return {
     channel: slackApprovalChannelId,
     text: `Trinetra approval requested for ${incident.id} (${incident.service})`,
@@ -1046,12 +1048,45 @@ function buildSlackApprovalMessage({ incidentKey, incident, commander, triage, g
       {
         type: "context",
         elements: [
-          { type: "mrkdwn", text: `Request ${requestId}${consoleUrl ? " · details available in Trinetra" : " · set PUBLIC_BASE_URL to enable Open incident"}` }
+          { type: "mrkdwn", text: `Request ${requestId} · ${detailText}` }
         ]
       },
       {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: "*Approval*\nUse the buttons below, or react with :white_check_mark: to approve remediation and :rotating_light: to escalate only."
+        }
+      },
+      {
         type: "actions",
-        elements: actionElements
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Approve" },
+            style: "primary",
+            action_id: "approve_remediation",
+            value: JSON.stringify({ incidentKey, requestId, decision: "approve" })
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Escalate" },
+            style: "danger",
+            action_id: "escalate_only",
+            value: JSON.stringify({ incidentKey, requestId, decision: "escalate" })
+          },
+          ...(consoleUrl
+            ? [
+                {
+                  type: "button",
+                  text: { type: "plain_text", text: "Open incident" },
+                  action_id: "open_incident",
+                  url: consoleUrl,
+                  value: JSON.stringify({ incidentKey, requestId, decision: "open" })
+                }
+              ]
+            : [])
+        ]
       }
     ],
     metadata: {
@@ -1105,6 +1140,7 @@ function clearPendingApprovalTimeout(incidentKey, state = "approved") {
   const timer = pendingApprovalTimers.get(incidentKey);
   if (timer) clearTimeout(timer);
   pendingApprovalTimers.delete(incidentKey);
+  clearSlackReactionApprovalWatch(incidentKey);
   const current = pendingApprovalTimeouts.get(incidentKey);
   if (current?.state === "pending") {
     pendingApprovalTimeouts.set(incidentKey, {
@@ -1113,6 +1149,102 @@ function clearPendingApprovalTimeout(incidentKey, state = "approved") {
       resolvedAt: new Date().toISOString()
     });
   }
+}
+
+function registerSlackReactionApprovalWatch({ incidentKey, channel, ts, requestId }) {
+  clearSlackReactionApprovalWatch(incidentKey);
+  const startedAt = Date.now();
+  const intervalMs = Number(process.env.SLACK_REACTION_POLL_INTERVAL_MS || 2500);
+  const timer = setInterval(() => {
+    if (Date.now() - startedAt > verificationTimeoutMs) {
+      clearSlackReactionApprovalWatch(incidentKey);
+      return;
+    }
+    void pollSlackApprovalReaction({ incidentKey, channel, ts, requestId }).catch((error) => {
+      void logger.warn("slack_reaction_poll_failed", {
+        requestId,
+        incidentKey,
+        message: error?.message || "Slack reaction poll failed"
+      }).catch(() => {});
+    });
+  }, intervalMs);
+  timer.unref?.();
+  pendingSlackReactionTimers.set(incidentKey, timer);
+  void pollSlackApprovalReaction({ incidentKey, channel, ts, requestId }).catch(() => {});
+  void logger.info("slack_reaction_watch_started", {
+    requestId,
+    incidentKey,
+    channel,
+    ts,
+    intervalMs
+  }).catch(() => {});
+}
+
+function clearSlackReactionApprovalWatch(incidentKey) {
+  const timer = pendingSlackReactionTimers.get(incidentKey);
+  if (timer) clearInterval(timer);
+  pendingSlackReactionTimers.delete(incidentKey);
+}
+
+async function pollSlackApprovalReaction({ incidentKey, channel, ts, requestId }) {
+  if (!process.env.SLACK_BOT_TOKEN) return;
+  const url = new URL("https://slack.com/api/reactions.get");
+  url.searchParams.set("channel", channel);
+  url.searchParams.set("timestamp", ts);
+  const response = await fetch(url, {
+    headers: {
+      "authorization": `Bearer ${process.env.SLACK_BOT_TOKEN}`
+    }
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.ok !== true) {
+    throw new Error(body.error || `Slack reactions.get returned ${response.status}`);
+  }
+  const reactions = Array.isArray(body.message?.reactions) ? body.message.reactions : [];
+  const approvedBy = findAllowedReactionUser(reactions, ["white_check_mark", "heavy_check_mark"]);
+  if (approvedBy) {
+    const approval = {
+      incidentKey,
+      approverId: approvedBy,
+      state: "approved",
+      source: "slack-reaction",
+      approvedAt: new Date().toISOString(),
+      requestId,
+      reaction: "white_check_mark",
+      channel,
+      ts
+    };
+    signedApprovals.set(incidentKey, approval);
+    clearPendingApprovalTimeout(incidentKey);
+    void logger.info("slack_reaction_approval_recorded", approval).catch(() => {});
+    return;
+  }
+  const escalatedBy = findAllowedReactionUser(reactions, ["rotating_light", "warning"]);
+  if (escalatedBy) {
+    const rejected = {
+      incidentKey,
+      approverId: escalatedBy,
+      state: "rejected",
+      source: "slack-reaction",
+      rejectedAt: new Date().toISOString(),
+      requestId,
+      reaction: "rotating_light",
+      channel,
+      ts
+    };
+    signedApprovals.set(incidentKey, rejected);
+    clearPendingApprovalTimeout(incidentKey, "rejected");
+    void logger.warn("slack_reaction_escalation_recorded", rejected).catch(() => {});
+  }
+}
+
+function findAllowedReactionUser(reactions, names) {
+  for (const reaction of reactions) {
+    if (!names.includes(reaction.name)) continue;
+    const user = (reaction.users || []).find((id) => slackApproverAllowlist.includes(id));
+    if (user) return user;
+  }
+  return null;
 }
 
 function currentDemoFailure() {

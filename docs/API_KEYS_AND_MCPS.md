@@ -153,6 +153,13 @@ Trinetra currently exposes simulated MCP adapters in the UI. These env vars are 
    npm start
    ```
 
+   Slack approval messages use reaction polling so local demos do not depend on a public inbound callback tunnel. Add these Bot Token Scopes to the Slack app and reinstall it:
+
+   - `chat:write`
+   - `reactions:read`
+
+   Legacy interactive-message callbacks still require `SLACK_SIGNING_SECRET` and a reachable `/api/slack/interactions` URL, but new approval requests should be approved by reacting with `:white_check_mark:` or escalated with `:rotating_light:`.
+
 6. **Approval-gated execution**
 
    ```bash

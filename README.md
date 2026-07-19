@@ -98,8 +98,8 @@ The smoke test covers:
 - `GET /api/logs` - recent redacted backend log events
 - `GET /api/mcps` - MCP connector registry
 - `GET /api/runbooks` - structured approved runbook library
-- `GET /api/slack/status` - Slack approval posting/signature configuration status
-- `POST /api/slack/interactions` - Slack-signed interactive approval callback
+- `GET /api/slack/status` - Slack approval posting/signature/reaction configuration status
+- `POST /api/slack/interactions` - Slack-signed interactive approval callback for legacy button messages
 - `GET /api/cloud/alibaba` - Alibaba Cloud deployment proof/config metadata
 - `GET /api/health` and `GET /api/readiness` - operational checks
 
@@ -178,6 +178,7 @@ Important variables:
 - `SLACK_APPROVER_IDS`
 - `SLACK_APPROVAL_CHANNEL_ID`
 - `SLACK_SIGNING_SECRET`
+- Slack OAuth scopes: `chat:write` for approval messages and `reactions:read` for reaction-based approval polling
 - `PUBLIC_BASE_URL`
 - `MCP_*_LIVE`
 
