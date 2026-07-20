@@ -1554,7 +1554,7 @@ body {
   width: 100vw;
   height: 100vh;
   display: grid;
-  grid-template-rows: minmax(0, 65fr) minmax(220px, 35fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 10px;
   padding: 10px;
 }
@@ -1571,19 +1571,21 @@ body {
 
 .pipeline-stage {
   display: grid;
-  grid-template-rows: auto auto auto minmax(132px, 1fr) auto minmax(130px, 0.8fr);
+  grid-template-rows: auto auto auto minmax(132px, 1fr) auto minmax(120px, 0.72fr) auto;
   gap: 10px;
   padding: 12px;
 }
 
 .pipeline-header,
 .log-header,
+.runtime-panel-header,
 .pipeline-controls,
 .target-strip,
 .branch-row,
 .gate-branches,
 .pipeline-flow,
-.log-actions {
+.log-actions,
+.runtime-toggle-row {
   display: flex;
   align-items: center;
 }
@@ -2004,6 +2006,174 @@ body {
   background: #060a12;
 }
 
+.runtime-controls {
+  min-height: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-toggle-row {
+  justify-content: center;
+  gap: 8px;
+}
+
+.runtime-toggle {
+  padding: 8px 12px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 999px;
+  background: #0b1220;
+  color: #9ca3af;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.runtime-toggle:hover,
+.runtime-toggle.active {
+  border-color: rgb(96 165 250 / 48%);
+  background: rgb(37 99 235 / 14%);
+  color: #dbeafe;
+  transform: translateY(-1px);
+}
+
+.runtime-drawer {
+  min-height: 0;
+  max-height: min(34vh, 360px);
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 8px;
+  background: #060a12;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%), 0 18px 44px rgb(0 0 0 / 24%);
+}
+
+.runtime-panel {
+  min-height: 0;
+  max-height: min(34vh, 360px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.runtime-panel-header {
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgb(255 255 255 / 8%);
+}
+
+.runtime-panel-header h2 {
+  margin: 0;
+  color: #f9fafb;
+  font-size: 0.95rem;
+}
+
+.runtime-panel-header p {
+  margin: 2px 0 0;
+  color: #6b7280;
+  font-size: 0.72rem;
+}
+
+.runtime-status-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 10px;
+  overflow: auto;
+  padding: 10px 12px 12px;
+}
+
+.runtime-status-grid section {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.runtime-status-grid h3 {
+  margin: 0;
+  color: #9ca3af;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.api-status-rows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+
+.api-status-row {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 6px;
+  background: #0b1220;
+}
+
+.api-status-row strong {
+  color: #e5e7eb;
+  font-size: 0.78rem;
+}
+
+.api-status-row span {
+  color: #9ca3af;
+  font-size: 0.72rem;
+}
+
+.api-status-row.success span {
+  color: #86efac;
+}
+
+.api-status-row.error span {
+  color: #f87171;
+}
+
+.api-status-row.pending span {
+  color: #fbbf24;
+}
+
+.api-status-row pre {
+  max-height: 78px;
+  overflow: auto;
+  margin: 0;
+  color: #9ca3af;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+#qwenPanel {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+#activeQwenStream {
+  max-height: 108px;
+  overflow: auto;
+  padding: 10px 12px 0;
+}
+
+#qwenTrace,
+#mcpTrace {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 12px;
+}
+
+#modelReadiness,
+#mcpReadiness,
+#mcpGrid {
+  display: grid;
+  gap: 8px;
+}
+
 .log-header {
   justify-content: space-between;
   gap: 16px;
@@ -2145,7 +2315,7 @@ body {
   .flow-console {
     height: auto;
     min-height: 100vh;
-    grid-template-rows: minmax(620px, auto) minmax(320px, 35vh);
+    grid-template-rows: minmax(620px, auto);
   }
 
   .pipeline-header {
@@ -2172,7 +2342,7 @@ body {
   }
 
   .pipeline-stage {
-    grid-template-rows: auto auto auto minmax(160px, 1fr) auto minmax(180px, 1fr);
+    grid-template-rows: auto auto auto minmax(160px, 1fr) auto minmax(180px, 1fr) auto;
   }
 
   .control-field,
@@ -2185,9 +2355,16 @@ body {
   .pipeline-controls,
   .target-strip,
   .log-header,
-  .log-actions {
+  .log-actions,
+  .runtime-panel-header,
+  .runtime-toggle-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .runtime-status-grid,
+  .api-status-rows {
+    grid-template-columns: 1fr;
   }
 
   .branch-row,
@@ -2204,5 +2381,241 @@ body {
 
   .log-row pre {
     margin-left: 0;
+  }
+}
+
+/* Brand palette pass: match the supplied Trinetra eye logo. */
+:root {
+  --brand-night: #050817;
+  --brand-panel: #090f21;
+  --brand-panel-2: #0d1530;
+  --brand-cyan: #27d7ff;
+  --brand-blue: #4d8bff;
+  --brand-violet: #9b5cff;
+  --brand-magenta: #bf5bff;
+  --brand-text: #f6f8ff;
+  --brand-muted: #8e98b8;
+  --brand-line: rgb(124 161 255 / 16%);
+  --brand-glow-cyan: rgb(39 215 255 / 22%);
+  --brand-glow-violet: rgb(155 92 255 / 24%);
+}
+
+body {
+  background:
+    radial-gradient(circle at 22% 0%, rgb(39 215 255 / 8%), transparent 30%),
+    radial-gradient(circle at 82% 12%, rgb(155 92 255 / 10%), transparent 32%),
+    linear-gradient(180deg, #070b19 0%, var(--brand-night) 72%);
+}
+
+.pipeline-stage {
+  position: relative;
+  isolation: isolate;
+  border-color: var(--brand-line);
+  background:
+    linear-gradient(180deg, rgb(13 21 48 / 88%), rgb(5 8 23 / 96%)),
+    var(--brand-panel);
+}
+
+.pipeline-stage::before {
+  content: "";
+  position: absolute;
+  right: -7vw;
+  top: -19vh;
+  z-index: -1;
+  width: min(46vw, 620px);
+  aspect-ratio: 1;
+  background: url("/assets/trinetra-brand-source-v2.png") center / contain no-repeat;
+  opacity: 0.1;
+  filter: saturate(1.18);
+  pointer-events: none;
+}
+
+.live-log-stage {
+  border-color: var(--brand-line);
+  background: #050817;
+}
+
+.brand-lockup {
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.brand-mark {
+  width: 58px;
+  height: 58px;
+  border-color: rgb(39 215 255 / 18%);
+  border-radius: 8px;
+  background: #050817;
+  object-fit: cover;
+  object-position: center;
+  filter: saturate(1.08) contrast(1.04);
+}
+
+.brand-lockup h1 {
+  color: var(--brand-text);
+  letter-spacing: 0.04em;
+}
+
+.subhead {
+  color: var(--brand-muted);
+}
+
+.mode-switch,
+.control-field,
+.pipeline-controls button,
+.target-strip button,
+.target-strip a,
+.runtime-toggle,
+.runtime-drawer,
+.log-actions input,
+.log-actions button,
+.target-strip,
+.pipeline-details {
+  border-color: var(--brand-line);
+  background: rgb(9 15 33 / 82%);
+}
+
+.primary-action {
+  border-color: rgb(39 215 255 / 48%) !important;
+  background: linear-gradient(135deg, #0877ff, #7c3aed) !important;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 5%), 0 12px 28px rgb(77 139 255 / 18%);
+}
+
+.mode-switch button.active {
+  background: linear-gradient(135deg, rgb(39 215 255 / 14%), rgb(155 92 255 / 15%));
+  color: var(--brand-text);
+}
+
+.control-field span,
+.detail-head span,
+.detail-grid span,
+.event-receipt span,
+.log-header p,
+.runtime-panel-header p {
+  color: var(--brand-muted);
+}
+
+.runtime-toggle.active,
+.runtime-toggle:hover {
+  border-color: rgb(39 215 255 / 46%);
+  background: linear-gradient(135deg, rgb(39 215 255 / 12%), rgb(155 92 255 / 12%));
+  color: #e8f8ff;
+}
+
+.runtime-drawer {
+  background:
+    radial-gradient(circle at 100% 0%, rgb(155 92 255 / 6%), transparent 36%),
+    #050817;
+}
+
+.api-status-row,
+.runtime-status-grid section {
+  border-color: rgb(124 161 255 / 12%);
+}
+
+.branch-path {
+  border-color: rgb(124 161 255 / 18%);
+  background: rgb(9 15 33 / 44%);
+}
+
+.branch-path.taken {
+  border-color: rgb(39 215 255 / 56%);
+  background: linear-gradient(135deg, rgb(39 215 255 / 14%), rgb(155 92 255 / 10%));
+  color: #dff8ff;
+  box-shadow: 0 0 18px rgb(39 215 255 / 10%);
+}
+
+.pipeline-node {
+  border-color: rgb(124 161 255 / 16%);
+  background: rgb(8 13 29 / 82%);
+}
+
+.pipeline-node.done .node-mark {
+  border-color: rgb(39 215 255 / 36%);
+  background: rgb(39 215 255 / 10%);
+  color: #8eeaff;
+}
+
+.pipeline-node.active {
+  border-color: rgb(155 92 255 / 78%);
+  background:
+    radial-gradient(circle at 52% 0%, rgb(39 215 255 / 18%), transparent 36%),
+    radial-gradient(circle at 50% 105%, rgb(155 92 255 / 20%), transparent 42%),
+    #0d1530;
+  color: var(--brand-text);
+  box-shadow: 0 0 0 1px rgb(39 215 255 / 14%), 0 0 34px var(--brand-glow-violet);
+}
+
+.pipeline-node.active .node-mark {
+  border-color: rgb(39 215 255 / 70%);
+  background: linear-gradient(135deg, rgb(39 215 255 / 28%), rgb(155 92 255 / 28%));
+}
+
+.pipeline-node.selected {
+  outline-color: rgb(39 215 255 / 52%);
+}
+
+.flow-line {
+  background: rgb(124 161 255 / 13%);
+}
+
+.flow-line::after {
+  background: linear-gradient(90deg, var(--brand-cyan), var(--brand-blue), var(--brand-violet));
+}
+
+.pipeline-details {
+  background:
+    linear-gradient(180deg, rgb(13 21 48 / 90%), rgb(7 11 25 / 92%)),
+    var(--brand-panel-2);
+}
+
+.detail-grid div,
+.inline-inspector,
+.inline-inspector pre,
+.log-row pre {
+  border-color: rgb(124 161 255 / 12%);
+  background: rgb(5 8 23 / 82%);
+}
+
+.detail-head strong,
+.detail-grid strong,
+.event-receipt strong,
+.log-header h2,
+.runtime-panel-header h2 {
+  color: var(--brand-text);
+}
+
+.inline-inspector summary {
+  color: #c7b8ff;
+}
+
+.inline-inspector.tool summary,
+.jump-live,
+.log-row strong {
+  color: #70e5ff !important;
+}
+
+.live-logs {
+  background:
+    linear-gradient(90deg, rgb(39 215 255 / 3%) 1px, transparent 1px) 0 0 / 64px 64px,
+    radial-gradient(circle at 100% 0%, rgb(155 92 255 / 7%), transparent 36%),
+    #050817;
+}
+
+.log-row.info strong {
+  color: #a78bfa !important;
+}
+
+.log-row code {
+  color: #dfe7ff;
+}
+
+@keyframes activeNodePulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgb(39 215 255 / 14%), 0 0 28px rgb(155 92 255 / 18%);
+  }
+  50% {
+    box-shadow: 0 0 0 1px rgb(39 215 255 / 36%), 0 0 44px rgb(155 92 255 / 34%);
   }
 }

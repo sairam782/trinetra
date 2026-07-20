@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trinetra</title>
     <link rel="icon" type="image/png" href="/assets/trinetra-mark-128.png" />
-    <link rel="stylesheet" href="/styles.css?v=20260718-flow-console" />
+    <link rel="stylesheet" href="/styles.css?v=20260719-auto-approval" />
   </head>
   <body>
     <main class="flow-console">
       <section class="pipeline-stage" aria-label="Live pipeline">
         <header class="pipeline-header">
           <div class="brand-lockup" aria-label="Trinetra">
-            <img class="brand-mark" src="/assets/trinetra-mark.png" alt="" aria-hidden="true" />
+            <img class="brand-mark" src="/assets/trinetra-brand-source-v2.png" alt="" aria-hidden="true" />
             <div>
               <h1>Trinetra</h1>
               <p class="subhead">Incident Response</p>
@@ -31,13 +31,6 @@
                 <option value="disk">Primary database disk pressure</option>
                 <option value="deploy">Auth failures after deploy</option>
                 <option value="website">Broken demo storefront</option>
-              </select>
-            </label>
-            <label class="control-field compact" for="approvalSelect">
-              <span>Gate</span>
-              <select id="approvalSelect">
-                <option value="pending">Pending approval</option>
-                <option value="approved">Requested approval</option>
               </select>
             </label>
             <button id="runButton" class="primary-action">Run pipeline</button>
@@ -126,21 +119,65 @@
             <span>Run an incident to inspect the active stage output here.</span>
           </div>
         </article>
-      </section>
 
-      <section class="live-log-stage" aria-label="Live log">
-        <header class="log-header">
-          <div>
-            <h2>Live Log</h2>
-            <p id="logStatus">waiting</p>
+        <section class="runtime-controls" aria-label="Realtime runtime details">
+          <div class="runtime-toggle-row" role="group" aria-label="Runtime detail panels">
+            <button id="toggleLiveLogButton" class="runtime-toggle" type="button" data-panel="liveLogPanel" aria-expanded="false">Live log</button>
+            <button id="toggleStatusButton" class="runtime-toggle" type="button" data-panel="statusPanel" aria-expanded="false">API &amp; MCP status</button>
+            <button id="toggleQwenButton" class="runtime-toggle" type="button" data-panel="qwenPanel" aria-expanded="false">Qwen prompts &amp; output</button>
           </div>
-          <div class="log-actions">
-            <input id="logSearch" type="search" placeholder="Filter logs" aria-label="Filter logs" />
-            <button id="refreshLogsButton" type="button">Refresh</button>
-            <button id="jumpToLiveButton" class="jump-live hidden" type="button">Jump to live</button>
+
+          <div id="runtimeDrawer" class="runtime-drawer hidden">
+            <article id="liveLogPanel" class="runtime-panel hidden" aria-label="Live log">
+              <header class="log-header">
+                <div>
+                  <h2>Live Log</h2>
+                  <p id="logStatus">waiting</p>
+                </div>
+                <div class="log-actions">
+                  <input id="logSearch" type="search" placeholder="Filter logs" aria-label="Filter logs" />
+                  <button id="refreshLogsButton" type="button">Refresh</button>
+                  <button id="jumpToLiveButton" class="jump-live hidden" type="button">Jump to live</button>
+                </div>
+              </header>
+              <div id="liveLogs" class="live-logs" tabindex="0"></div>
+            </article>
+
+            <article id="statusPanel" class="runtime-panel hidden" aria-label="API and MCP status">
+              <header class="runtime-panel-header">
+                <div>
+                  <h2>API &amp; MCP Status</h2>
+                  <p>Real readiness and connector activity from the current backend runtime.</p>
+                </div>
+              </header>
+              <div id="apiStatusRows" class="api-status-rows"></div>
+              <div class="runtime-status-grid">
+                <section>
+                  <h3>Qwen</h3>
+                  <div id="qwenReadiness"></div>
+                  <div id="modelReadiness"></div>
+                </section>
+                <section>
+                  <h3>Slack / MCP</h3>
+                  <div id="mcpReadiness"></div>
+                  <div id="mcpGrid"></div>
+                  <div id="mcpTrace"></div>
+                </section>
+              </div>
+            </article>
+
+            <article id="qwenPanel" class="runtime-panel hidden" aria-label="Qwen prompts and outputs">
+              <header class="runtime-panel-header">
+                <div>
+                  <h2>Qwen Prompts &amp; Output</h2>
+                  <p id="streamStatus">waiting</p>
+                </div>
+              </header>
+              <div id="activeQwenStream"></div>
+              <div id="qwenTrace"></div>
+            </article>
           </div>
-        </header>
-        <div id="liveLogs" class="live-logs" tabindex="0"></div>
+        </section>
       </section>
 
       <div class="legacy-sinks" aria-hidden="true">
@@ -149,9 +186,6 @@
         <div id="realtimeEvents"></div>
         <div id="headerIncident"></div>
         <div id="headerStatus"></div>
-        <div id="qwenReadiness"></div>
-        <div id="modelReadiness"></div>
-        <div id="mcpReadiness"></div>
         <div id="demoSiteText"></div>
         <div id="modeText"></div>
         <div id="healthText"></div>
@@ -182,19 +216,14 @@
         <div id="agentGraph"></div>
         <div id="graphStatus"></div>
         <div id="graphNodeDetails"></div>
-        <div id="mcpGrid"></div>
-        <div id="mcpTrace"></div>
         <div id="executionTimeline"></div>
-        <div id="qwenTrace"></div>
         <div id="timelineStatus"></div>
-        <div id="streamStatus"></div>
-        <div id="activeQwenStream"></div>
         <div id="recentRuns"></div>
         <div id="traceInspector"></div>
         <div id="drawerStatus"></div>
       </div>
     </main>
 
-    <script type="module" src="/app.js?v=20260718-flow-console"></script>
+    <script type="module" src="/app.js?v=20260719-auto-approval"></script>
   </body>
 </html>

@@ -11,7 +11,6 @@ const els = {
   modelReadiness: document.querySelector("#modelReadiness"),
   mcpReadiness: document.querySelector("#mcpReadiness"),
   incidentSelect: document.querySelector("#incidentSelect"),
-  approvalSelect: document.querySelector("#approvalSelect"),
   runButton: document.querySelector("#runButton"),
   failureSelect: document.querySelector("#failureSelect"),
   injectErrorButton: document.querySelector("#injectErrorButton"),
@@ -60,6 +59,14 @@ const els = {
   logStatus: document.querySelector("#logStatus"),
   refreshLogsButton: document.querySelector("#refreshLogsButton"),
   jumpToLiveButton: document.querySelector("#jumpToLiveButton"),
+  toggleLiveLogButton: document.querySelector("#toggleLiveLogButton"),
+  toggleStatusButton: document.querySelector("#toggleStatusButton"),
+  toggleQwenButton: document.querySelector("#toggleQwenButton"),
+  runtimeDrawer: document.querySelector("#runtimeDrawer"),
+  liveLogPanel: document.querySelector("#liveLogPanel"),
+  statusPanel: document.querySelector("#statusPanel"),
+  qwenPanel: document.querySelector("#qwenPanel"),
+  apiStatusRows: document.querySelector("#apiStatusRows"),
   pipelineFlow: document.querySelector("#pipelineFlow"),
   pipelineDetails: document.querySelector("#pipelineDetails"),
   fastPathBranch: document.querySelector("#fastPathBranch"),
@@ -83,13 +90,15 @@ let currentLogs = [];
 let liveTimelineEvents = [];
 let activeQwen = null;
 let logAutoScroll = true;
+let openRuntimePanel = null;
+let pipelineRunning = false;
+const autoResumedApprovalIds = new Set();
 const initialIncidentKey = new URLSearchParams(window.location.search).get("incident");
 
 els.demoModeButton.addEventListener("click", () => setMode("demo"));
 els.realtimeModeButton.addEventListener("click", () => setMode("realtime"));
 els.runButton.addEventListener("click", runAgents);
 els.incidentSelect.addEventListener("change", resetPipelineForSelectionChange);
-els.approvalSelect.addEventListener("change", resetPipelineForSelectionChange);
 els.injectErrorButton.addEventListener("click", injectDemoError);
 els.solveWebsiteButton.addEventListener("click", solveWebsiteIncident);
 els.refreshLogsButton.addEventListener("click", refreshLogs);
@@ -103,6 +112,9 @@ els.liveLogs.addEventListener("scroll", () => {
   const distanceFromBottom = els.liveLogs.scrollHeight - els.liveLogs.clientHeight - els.liveLogs.scrollTop;
   logAutoScroll = distanceFromBottom < 24;
   els.jumpToLiveButton.classList.toggle("hidden", logAutoScroll);
+});
+[els.toggleLiveLogButton, els.toggleStatusButton, els.toggleQwenButton].forEach((button) => {
+  button.addEventListener("click", () => toggleRuntimePanel(button.dataset.panel));
 });
 els.pipelineFlow.addEventListener("click", (event) => {
   const node = event.target.closest("[data-stage]");
@@ -126,6 +138,7 @@ refreshOpsStatus();
 refreshDemoSiteStatus();
 refreshLogs();
 logTimer = setInterval(refreshLogs, 6000);
+setInterval(refreshApprovals, 2500);
 
 function setMode(mode) {
   currentMode = mode;
@@ -147,12 +160,13 @@ function setMode(mode) {
   }
 }
 
-async function runAgents() {
+async function runAgents(options = {}) {
   setLoading(true);
   const payload = {
     incidentKey: els.incidentSelect.value,
-    approval: els.approvalSelect.value
+    approval: "pending"
   };
+  if (options.approvalRequestId) payload.approvalRequestId = options.approvalRequestId;
   try {
     renderLoadingTrace();
     let data = null;
@@ -680,6 +694,12 @@ async function refreshOpsStatus() {
   } else {
     els.readinessText.textContent = "unknown";
   }
+  renderApiStatusRows({
+    health: health.status === "fulfilled" ? health.value : null,
+    readiness: readiness.status === "fulfilled" ? readiness.value : null,
+    healthError: health.status === "rejected" ? health.reason?.message : null,
+    readinessError: readiness.status === "rejected" ? readiness.reason?.message : null
+  });
 }
 
 async function refreshDemoSiteStatus() {
@@ -720,7 +740,6 @@ async function injectDemoError() {
     body: JSON.stringify({ failureId: els.failureSelect.value })
   });
   els.incidentSelect.value = "website";
-  els.approvalSelect.value = "pending";
   resetPipelineForInjectedFailure();
   await refreshDemoSiteStatus();
   await refreshLogs();
@@ -728,7 +747,6 @@ async function injectDemoError() {
 
 async function solveWebsiteIncident() {
   els.incidentSelect.value = "website";
-  els.approvalSelect.value = "pending";
   await runAgents();
   await refreshDemoSiteStatus();
 }
@@ -801,6 +819,43 @@ async function refreshRealtimeStatus() {
   }
 }
 
+async function refreshApprovals() {
+  if (pipelineRunning || !isPipelineWaitingForApproval(lastRunData)) return;
+  try {
+    const approvals = await fetchJson("/api/approvals");
+    const signed = Array.isArray(approvals?.signed) ? approvals.signed : [];
+    const incidentKey = lastRunData?.incidentKey || els.incidentSelect.value;
+    const requestId = lastRunData?.requestId || null;
+    const approval = signed
+      .filter((item) => item?.incidentKey === incidentKey && item.state === "approved" && (!requestId || item.requestId === requestId))
+      .sort((a, b) => timestampValue(b.approvedAt) - timestampValue(a.approvedAt))[0];
+    if (!approval) return;
+    const approvalKey = `${approval.incidentKey}:${approval.requestId}:${approval.approvedAt}`;
+    if (autoResumedApprovalIds.has(approvalKey)) return;
+    autoResumedApprovalIds.add(approvalKey);
+    appendLiveTimelineEvent({
+      type: "slack_approval_recorded",
+      label: `Slack approval recorded from ${valueOrNA(approval.approverId)}`,
+      timestamp: approval.approvedAt
+    });
+    updatePipelineFromStream({
+      type: "approval",
+      label: "Slack approval recorded; resuming pipeline",
+      timestamp: approval.approvedAt
+    });
+    await runAgents({ approvalRequestId: approval.requestId });
+    await refreshDemoSiteStatus();
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+function isPipelineWaitingForApproval(data) {
+  if (!data) return false;
+  const gateText = `${data.gate?.kind || ""} ${data.gate?.label || ""} ${data.verification?.status || ""} ${data.verification?.message || ""}`;
+  return /human|approval|paused/i.test(gateText) && !/approved|healthy|resolved|closed|success/i.test(gateText);
+}
+
 function renderRealtimeStatus(status) {
   els.realtimeGeneratedAt.textContent = new Date(status.generatedAt).toLocaleTimeString();
   els.qwenReadiness.textContent = status.qwen.liveEnabled
@@ -859,6 +914,60 @@ function renderRealtimeStatus(status) {
       ${mcp.health ? `<small>${escapeHtml(mcp.health)}</small>` : ""}
     `;
     return card;
+  }));
+  renderRuntimePanelState();
+}
+
+function toggleRuntimePanel(panelId) {
+  openRuntimePanel = openRuntimePanel === panelId ? null : panelId;
+  renderRuntimePanelState();
+  if (openRuntimePanel === "liveLogPanel") {
+    renderLogs(currentLogs);
+    scrollLogsToBottom();
+  }
+  if (openRuntimePanel === "statusPanel") {
+    refreshOpsStatus();
+    refreshRealtimeStatus();
+  }
+  if (openRuntimePanel === "qwenPanel") {
+    renderQwenTrace(lastRunData?.qwenTrace || []);
+  }
+}
+
+function renderRuntimePanelState() {
+  const panels = [els.liveLogPanel, els.statusPanel, els.qwenPanel];
+  const buttons = [els.toggleLiveLogButton, els.toggleStatusButton, els.toggleQwenButton];
+  els.runtimeDrawer.classList.toggle("hidden", !openRuntimePanel);
+  panels.forEach((panel) => panel.classList.toggle("hidden", panel.id !== openRuntimePanel));
+  buttons.forEach((button) => {
+    const active = button.dataset.panel === openRuntimePanel;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-expanded", String(active));
+  });
+}
+
+function renderApiStatusRows({ health, readiness, healthError, readinessError } = {}) {
+  const rows = [
+    {
+      label: "Backend API",
+      status: health ? (health.ok ? "healthy" : "degraded") : "Not available",
+      detail: health ? `mode=${valueOrNA(health.mode)}` : valueOrNA(healthError)
+    },
+    {
+      label: "Readiness",
+      status: readiness ? (readiness.ready ? "ready" : "not ready") : "Not available",
+      detail: readiness ? JSON.stringify(readiness.checks || readiness, null, 2) : valueOrNA(readinessError)
+    }
+  ];
+  els.apiStatusRows.replaceChildren(...rows.map((row) => {
+    const article = document.createElement("article");
+    article.className = `api-status-row ${statusClass(row.status)}`;
+    article.innerHTML = `
+      <strong>${escapeHtml(row.label)}</strong>
+      <span>${escapeHtml(row.status)}</span>
+      <pre>${escapeHtml(row.detail)}</pre>
+    `;
+    return article;
   }));
 }
 
@@ -1366,6 +1475,7 @@ function labelFor(key) {
 }
 
 function setLoading(isLoading) {
+  pipelineRunning = isLoading;
   document.body.classList.toggle("pipeline-running", isLoading);
   els.runButton.disabled = isLoading;
   els.solveWebsiteButton.disabled = isLoading;

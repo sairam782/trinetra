@@ -765,10 +765,10 @@ function securityHeaders(headers, requestId) {
 
 function validateAnalyzeRequest(body) {
   const incidentKey = typeof body.incidentKey === "string" ? body.incidentKey : "latency";
-  const requestedApproval = typeof body.approval === "string" ? body.approval : "pending";
+  const requestedApproval = "pending";
+  const approvalRequestId = typeof body.approvalRequestId === "string" ? body.approvalRequestId : null;
   if (!incidents[incidentKey]) throw new HttpError(400, `Unknown incidentKey: ${incidentKey}`);
-  if (!["pending", "approved"].includes(requestedApproval)) throw new HttpError(400, `Unsupported approval state: ${requestedApproval}`);
-  return { incidentKey, requestedApproval };
+  return { incidentKey, requestedApproval, approvalRequestId };
 }
 
 function verifyAndRecordSlackApproval(req, rawBody, requestId) {
@@ -812,7 +812,7 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
       requestId: approvalRequestId,
       actionId
     };
-    signedApprovals.set(incidentKey, rejected);
+    signedApprovals.set(approvalKey(incidentKey, approvalRequestId), rejected);
     clearPendingApprovalTimeout(incidentKey, "rejected");
     void logger.warn("slack_approval_rejected", rejected).catch(() => {});
     return rejected;
@@ -826,7 +826,7 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
     requestId: approvalRequestId,
     actionId
   };
-  signedApprovals.set(incidentKey, approval);
+  signedApprovals.set(approvalKey(incidentKey, approvalRequestId), approval);
   clearPendingApprovalTimeout(incidentKey);
   void logger.info("slack_approval_recorded", approval).catch(() => {});
   return approval;
@@ -834,7 +834,7 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
 
 function slackInteractionResponseText(approval) {
   if (approval.state === "approved") {
-    return `Trinetra recorded approval for ${approval.incidentKey}. Re-run the pipeline to continue remediation.`;
+    return `Trinetra recorded approval for ${approval.incidentKey}. The console will resume the pipeline automatically.`;
   }
   if (approval.state === "rejected") {
     return `Trinetra recorded escalation for ${approval.incidentKey}.`;
@@ -879,8 +879,13 @@ function safeEqual(a, b) {
   return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
-function resolveSignedApproval(incidentKey) {
-  const approval = signedApprovals.get(incidentKey);
+function approvalKey(incidentKey, requestId) {
+  return `${incidentKey}:${requestId || "unknown"}`;
+}
+
+function resolveSignedApproval(incidentKey, requestId) {
+  if (!requestId) return { approval: "pending", approverId: null, source: "none" };
+  const approval = signedApprovals.get(approvalKey(incidentKey, requestId));
   if (!approval || approval.state !== "approved") {
     return { approval: "pending", approverId: null, source: "none" };
   }
@@ -1214,7 +1219,7 @@ async function pollSlackApprovalReaction({ incidentKey, channel, ts, requestId }
       channel,
       ts
     };
-    signedApprovals.set(incidentKey, approval);
+    signedApprovals.set(approvalKey(incidentKey, requestId), approval);
     clearPendingApprovalTimeout(incidentKey);
     void logger.info("slack_reaction_approval_recorded", approval).catch(() => {});
     return;
@@ -1232,7 +1237,7 @@ async function pollSlackApprovalReaction({ incidentKey, channel, ts, requestId }
       channel,
       ts
     };
-    signedApprovals.set(incidentKey, rejected);
+    signedApprovals.set(approvalKey(incidentKey, requestId), rejected);
     clearPendingApprovalTimeout(incidentKey, "rejected");
     void logger.warn("slack_reaction_escalation_recorded", rejected).catch(() => {});
   }
@@ -1279,9 +1284,9 @@ function buildWebsiteIncident() {
   };
 }
 
-async function orchestrateIncident({ incidentKey = "latency", requestedApproval = "pending" }, requestId = crypto.randomUUID(), options = {}) {
+async function orchestrateIncident({ incidentKey = "latency", requestedApproval = "pending", approvalRequestId = null }, requestId = crypto.randomUUID(), options = {}) {
   const emit = options.emit || null;
-  const approvalState = resolveSignedApproval(incidentKey);
+  const approvalState = resolveSignedApproval(incidentKey, approvalRequestId);
   const approval = approvalState.approval;
   const approverId = approvalState.approverId;
   const incident = incidentKey === "website" ? buildWebsiteIncident() : incidents[incidentKey] || incidents.latency;
@@ -1487,6 +1492,7 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
 
   return {
     incident,
+    incidentKey,
     runId: `RUN-${requestId.slice(0, 8)}`,
     requestId,
     startedAt: runStartedAt,

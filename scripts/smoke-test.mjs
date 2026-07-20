@@ -13,6 +13,7 @@ const child = spawn(process.execPath, ["backend/server.mjs"], {
     QWEN_LIVE_CALLS: "false",
     REMEDIATION_EXECUTION_MODE: "dry-run",
     SLACK_SIGNING_SECRET: slackSigningSecret,
+    SLACK_APPROVER_IDS: "U-HACK-JUDGE",
     SYNTHETIC_CHECK_INTERVAL_MS: "1000",
     RUNBOOK_ALLOWLIST: "RB-101,RB-204,RB-330,RB-401,RB-510,RB-777"
   },
@@ -33,10 +34,11 @@ try {
     body: JSON.stringify({ failureId: "apiTimeout" })
   });
   const brokenSite = await requestText("/demo-store", { expectedStatus: 504 });
-  await approveIncident("website");
+  const approvalRequestId = "smoke-website-approval";
+  await approveIncident("website", approvalRequestId);
   const websiteAnalysis = await requestJson("/api/incidents/analyze", {
     method: "POST",
-    body: JSON.stringify({ incidentKey: "website", approval: "approved", approverId: "U-HACK-JUDGE" })
+    body: JSON.stringify({ incidentKey: "website", approval: "approved", approvalRequestId })
   });
   const approvals = await requestJson("/api/approvals");
   const synthetic = await requestJson("/api/synthetic/status");
@@ -74,11 +76,11 @@ try {
   child.kill("SIGTERM");
 }
 
-async function approveIncident(incidentKey) {
+async function approveIncident(incidentKey, requestId) {
   const payload = {
     type: "block_actions",
     user: { id: "U-HACK-JUDGE" },
-    actions: [{ action_id: "approve_remediation", value: incidentKey }]
+    actions: [{ action_id: "approve_remediation", value: JSON.stringify({ incidentKey, requestId }) }]
   };
   const body = new URLSearchParams({ payload: JSON.stringify(payload) }).toString();
   const timestamp = String(Math.floor(Date.now() / 1000));
