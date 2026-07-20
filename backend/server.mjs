@@ -29,6 +29,7 @@ const approvedRunbookAllowlist = new Set((process.env.RUNBOOK_ALLOWLIST || "RB-1
 const slackApproverAllowlist = (process.env.SLACK_APPROVER_IDS || "U-HACK-JUDGE,U-ONCALL-PRIMARY").split(",").map((item) => item.trim()).filter(Boolean);
 const slackSigningSecret = process.env.SLACK_SIGNING_SECRET || "";
 const slackApprovalChannelId = process.env.SLACK_APPROVAL_CHANNEL_ID || process.env.SLACK_CHANNEL_ID || "";
+const slackInteractiveButtonsEnabled = process.env.SLACK_INTERACTIVE_BUTTONS === "true";
 const publicBaseUrl = process.env.PUBLIC_BASE_URL || process.env.APP_BASE_URL || "";
 const qwenApiKeyConfigured = Boolean(process.env.QWEN_API_KEY || process.env.DASHSCOPE_API_KEY);
 const qwenConfig = qwenRuntimeConfig();
@@ -679,7 +680,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const safePath = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, "");
-    const filePath = safePath === "/" ? join(publicDir, "index.html") : join(publicDir, safePath);
+    const filePath = safePath === "/" || safePath === "\\" ? join(publicDir, "index.html") : join(publicDir, safePath);
     if (!filePath.startsWith(publicDir)) {
       sendJson(res, 403, { error: "Forbidden", requestId }, requestId);
       return;
@@ -1026,6 +1027,35 @@ function buildSlackApprovalMessage({ incidentKey, incident, commander, triage, g
   const detailText = consoleUrl
     ? `Open details: <${consoleUrl}|Trinetra incident>`
     : "Open details in Trinetra after PUBLIC_BASE_URL is configured.";
+  const actionElements = slackInteractiveButtonsEnabled
+    ? [
+        {
+          type: "button",
+          text: { type: "plain_text", text: "Approve" },
+          style: "primary",
+          action_id: "approve_remediation",
+          value: JSON.stringify({ incidentKey, requestId, decision: "approve" })
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "Escalate" },
+          style: "danger",
+          action_id: "escalate_only",
+          value: JSON.stringify({ incidentKey, requestId, decision: "escalate" })
+        },
+        ...(consoleUrl
+          ? [
+              {
+                type: "button",
+                text: { type: "plain_text", text: "Open incident" },
+                action_id: "open_incident",
+                url: consoleUrl,
+                value: JSON.stringify({ incidentKey, requestId, decision: "open" })
+              }
+            ]
+          : [])
+      ]
+    : [];
   return {
     channel: slackApprovalChannelId,
     text: `Trinetra approval requested for ${incident.id} (${incident.service})`,
@@ -1060,39 +1090,12 @@ function buildSlackApprovalMessage({ incidentKey, incident, commander, triage, g
         type: "section",
         text: {
           type: "mrkdwn",
-          text: "*Approval*\nUse the buttons below, or react with :white_check_mark: to approve remediation and :rotating_light: to escalate only."
+          text: slackInteractiveButtonsEnabled
+            ? "*Approval*\nUse the buttons below, or react with :white_check_mark: to approve remediation and :rotating_light: to escalate only."
+            : "*Approval*\nReact with :white_check_mark: to approve remediation, or :rotating_light: to escalate only."
         }
       },
-      {
-        type: "actions",
-        elements: [
-          {
-            type: "button",
-            text: { type: "plain_text", text: "Approve" },
-            style: "primary",
-            action_id: "approve_remediation",
-            value: JSON.stringify({ incidentKey, requestId, decision: "approve" })
-          },
-          {
-            type: "button",
-            text: { type: "plain_text", text: "Escalate" },
-            style: "danger",
-            action_id: "escalate_only",
-            value: JSON.stringify({ incidentKey, requestId, decision: "escalate" })
-          },
-          ...(consoleUrl
-            ? [
-                {
-                  type: "button",
-                  text: { type: "plain_text", text: "Open incident" },
-                  action_id: "open_incident",
-                  url: consoleUrl,
-                  value: JSON.stringify({ incidentKey, requestId, decision: "open" })
-                }
-              ]
-            : [])
-        ]
-      }
+      ...(actionElements.length ? [{ type: "actions", elements: actionElements }] : [])
     ],
     metadata: {
       event_type: "trinetra_approval_request",
