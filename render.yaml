@@ -1,0 +1,55 @@
+services:
+  - type: web
+    name: trinetra
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node backend/server.mjs
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: MAX_BODY_BYTES
+        value: "64000"
+      - key: QWEN_API_KEY
+        sync: false
+      - key: QWEN_API_BASE_URL
+        value: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+      - key: QWEN_MODEL_DEFAULT
+        value: qwen-plus
+      - key: QWEN_MODEL_REMEDIATION
+        value: qwen-plus
+      - key: QWEN_AGENT_TIMEOUT_MS
+        value: "30000"
+      - key: QWEN_AGENT_RETRY_COUNT
+        value: "1"
+      - key: QWEN_LIVE_CALLS
+        value: "true"
+      - key: REMEDIATION_EXECUTION_MODE
+        value: execute
+      - key: VERIFICATION_TIMEOUT_MS
+        value: "180000"
+      - key: RUNBOOK_ALLOWLIST
+        value: RB-101,RB-204,RB-330,RB-401,RB-510,RB-777
+      - key: SLACK_APPROVER_IDS
+        sync: false
+      - key: MCP_CHAT_LIVE
+        value: "true"
+      - key: SLACK_APPROVAL_CHANNEL_ID
+        sync: false
+      - key: SLACK_INTERACTIVE_BUTTONS
+        value: "true"
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SLACK_SIGNING_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: ALIBABA_CLOUD_REGION
+        value: us-west-1
+      - key: ALIBABA_COMPUTE_TARGET
+        value: Render Web Service with Alibaba/Qwen integration
+      - key: ALIBABA_DATABASE_TARGET
+        value: ephemeral demo storage

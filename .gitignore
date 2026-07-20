@@ -3,5 +3,7 @@ data/
 .env
 .DS_Store
 npm-debug.log*
+cloudflared*.log
+localtunnel*.log
 coverage/
 dist/
