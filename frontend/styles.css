@@ -1,13 +1,13 @@
 :root {
   color-scheme: dark;
-  --panel-obsidian: #0B0E13;
-  --panel-steel: #151A21;
-  --panel-hairline: #2A323C;
-  --signal-brass: #C98A3E;
-  --signal-verified: #4FA98C;
-  --signal-alert: #C85450;
-  --ink-primary: #E8E4DC;
-  --ink-secondary: #8B929C;
+  --panel-obsidian: #07111d;
+  --panel-steel: #0d1624;
+  --panel-hairline: #243247;
+  --signal-brass: #d59a2e;
+  --signal-verified: #30a46c;
+  --signal-alert: #e05252;
+  --ink-primary: #e6edf6;
+  --ink-secondary: #8a96a8;
   --panel-recessed: color-mix(in srgb, var(--panel-obsidian) 88%, black);
   --panel-raised: color-mix(in srgb, var(--panel-steel) 86%, var(--ink-primary));
   --ink-subtle: color-mix(in srgb, var(--ink-primary) 68%, var(--ink-secondary));
@@ -24,9 +24,9 @@
   --text: var(--ink-primary);
   --muted: var(--ink-secondary);
   --soft: var(--ink-subtle);
-  --ai: var(--signal-brass);
-  --ai-soft: var(--signal-brass);
-  --tool: var(--signal-brass);
+  --ai: #8b7cf6;
+  --ai-soft: #b4a7ff;
+  --tool: #4fa3ff;
   --ok: var(--signal-verified);
   --warn: var(--signal-brass);
   --bad: var(--signal-alert);
@@ -2384,27 +2384,31 @@ body {
   }
 }
 
-/* Brand palette pass: match the supplied Trinetra eye logo. */
+/* Enterprise palette pass: quiet SRE console with restrained Trinetra accents. */
 :root {
-  --brand-night: #050817;
-  --brand-panel: #090f21;
-  --brand-panel-2: #0d1530;
-  --brand-cyan: #27d7ff;
-  --brand-blue: #4d8bff;
-  --brand-violet: #9b5cff;
-  --brand-magenta: #bf5bff;
-  --brand-text: #f6f8ff;
-  --brand-muted: #8e98b8;
-  --brand-line: rgb(124 161 255 / 16%);
-  --brand-glow-cyan: rgb(39 215 255 / 22%);
-  --brand-glow-violet: rgb(155 92 255 / 24%);
+  --brand-night: #07111d;
+  --brand-panel: #0d1624;
+  --brand-panel-2: #101b2c;
+  --brand-raised: #142235;
+  --brand-cyan: #5cc8e8;
+  --brand-blue: #4f8cff;
+  --brand-violet: #8b7cf6;
+  --brand-green: #30a46c;
+  --brand-amber: #d59a2e;
+  --brand-red: #e05252;
+  --brand-text: #e6edf6;
+  --brand-muted: #8a96a8;
+  --brand-dim: #607086;
+  --brand-line: rgb(148 163 184 / 15%);
+  --brand-line-strong: rgb(148 163 184 / 24%);
+  --brand-accent-soft: rgb(79 140 255 / 12%);
+  --brand-ai-soft: rgb(139 124 246 / 14%);
 }
 
 body {
   background:
-    radial-gradient(circle at 22% 0%, rgb(39 215 255 / 8%), transparent 30%),
-    radial-gradient(circle at 82% 12%, rgb(155 92 255 / 10%), transparent 32%),
-    linear-gradient(180deg, #070b19 0%, var(--brand-night) 72%);
+    linear-gradient(180deg, rgb(255 255 255 / 2%), transparent 18%),
+    var(--brand-night);
 }
 
 .pipeline-stage {
@@ -2412,7 +2416,7 @@ body {
   isolation: isolate;
   border-color: var(--brand-line);
   background:
-    linear-gradient(180deg, rgb(13 21 48 / 88%), rgb(5 8 23 / 96%)),
+    linear-gradient(180deg, rgb(16 27 44 / 86%), rgb(7 17 29 / 94%)),
     var(--brand-panel);
 }
 
@@ -2425,8 +2429,8 @@ body {
   width: min(46vw, 620px);
   aspect-ratio: 1;
   background: url("/assets/trinetra-brand-source-v2.png") center / contain no-repeat;
-  opacity: 0.1;
-  filter: saturate(1.18);
+  opacity: 0.045;
+  filter: saturate(0.72) contrast(0.9);
   pointer-events: none;
 }
 
@@ -2443,12 +2447,12 @@ body {
 .brand-mark {
   width: 58px;
   height: 58px;
-  border-color: rgb(39 215 255 / 18%);
+  border-color: var(--brand-line-strong);
   border-radius: 8px;
-  background: #050817;
+  background: #08111e;
   object-fit: cover;
   object-position: center;
-  filter: saturate(1.08) contrast(1.04);
+  filter: saturate(0.9) contrast(1);
 }
 
 .brand-lockup h1 {
@@ -2476,13 +2480,13 @@ body {
 }
 
 .primary-action {
-  border-color: rgb(39 215 255 / 48%) !important;
-  background: linear-gradient(135deg, #0877ff, #7c3aed) !important;
-  box-shadow: 0 0 0 1px rgb(255 255 255 / 5%), 0 12px 28px rgb(77 139 255 / 18%);
+  border-color: rgb(79 140 255 / 42%) !important;
+  background: #2563eb !important;
+  box-shadow: 0 12px 26px rgb(37 99 235 / 16%);
 }
 
 .mode-switch button.active {
-  background: linear-gradient(135deg, rgb(39 215 255 / 14%), rgb(155 92 255 / 15%));
+  background: var(--brand-raised);
   color: var(--brand-text);
 }
 
@@ -2497,75 +2501,72 @@ body {
 
 .runtime-toggle.active,
 .runtime-toggle:hover {
-  border-color: rgb(39 215 255 / 46%);
-  background: linear-gradient(135deg, rgb(39 215 255 / 12%), rgb(155 92 255 / 12%));
-  color: #e8f8ff;
+  border-color: rgb(79 140 255 / 42%);
+  background: var(--brand-accent-soft);
+  color: #d7e7ff;
 }
 
 .runtime-drawer {
   background:
-    radial-gradient(circle at 100% 0%, rgb(155 92 255 / 6%), transparent 36%),
+    linear-gradient(180deg, rgb(16 27 44 / 68%), rgb(7 17 29 / 92%)),
     #050817;
 }
 
 .api-status-row,
 .runtime-status-grid section {
-  border-color: rgb(124 161 255 / 12%);
+  border-color: var(--brand-line);
 }
 
 .branch-path {
-  border-color: rgb(124 161 255 / 18%);
-  background: rgb(9 15 33 / 44%);
+  border-color: var(--brand-line);
+  background: rgb(13 22 36 / 56%);
 }
 
 .branch-path.taken {
-  border-color: rgb(39 215 255 / 56%);
-  background: linear-gradient(135deg, rgb(39 215 255 / 14%), rgb(155 92 255 / 10%));
-  color: #dff8ff;
-  box-shadow: 0 0 18px rgb(39 215 255 / 10%);
+  border-color: rgb(79 140 255 / 48%);
+  background: rgb(79 140 255 / 12%);
+  color: #d7e7ff;
+  box-shadow: inset 0 0 0 1px rgb(79 140 255 / 8%);
 }
 
 .pipeline-node {
-  border-color: rgb(124 161 255 / 16%);
-  background: rgb(8 13 29 / 82%);
+  border-color: var(--brand-line);
+  background: rgb(10 20 34 / 82%);
 }
 
 .pipeline-node.done .node-mark {
-  border-color: rgb(39 215 255 / 36%);
-  background: rgb(39 215 255 / 10%);
-  color: #8eeaff;
+  border-color: rgb(48 164 108 / 42%);
+  background: rgb(48 164 108 / 12%);
+  color: #8adbb3;
 }
 
 .pipeline-node.active {
-  border-color: rgb(155 92 255 / 78%);
-  background:
-    radial-gradient(circle at 52% 0%, rgb(39 215 255 / 18%), transparent 36%),
-    radial-gradient(circle at 50% 105%, rgb(155 92 255 / 20%), transparent 42%),
-    #0d1530;
+  border-color: rgb(139 124 246 / 62%);
+  background: #16213a;
   color: var(--brand-text);
-  box-shadow: 0 0 0 1px rgb(39 215 255 / 14%), 0 0 34px var(--brand-glow-violet);
+  box-shadow: 0 0 0 1px rgb(139 124 246 / 16%), 0 16px 42px rgb(0 0 0 / 26%);
 }
 
 .pipeline-node.active .node-mark {
-  border-color: rgb(39 215 255 / 70%);
-  background: linear-gradient(135deg, rgb(39 215 255 / 28%), rgb(155 92 255 / 28%));
+  border-color: rgb(139 124 246 / 70%);
+  background: rgb(139 124 246 / 24%);
 }
 
 .pipeline-node.selected {
-  outline-color: rgb(39 215 255 / 52%);
+  outline-color: rgb(79 140 255 / 48%);
 }
 
 .flow-line {
-  background: rgb(124 161 255 / 13%);
+  background: rgb(148 163 184 / 12%);
 }
 
 .flow-line::after {
-  background: linear-gradient(90deg, var(--brand-cyan), var(--brand-blue), var(--brand-violet));
+  background: linear-gradient(90deg, var(--brand-blue), var(--brand-violet));
 }
 
 .pipeline-details {
   background:
-    linear-gradient(180deg, rgb(13 21 48 / 90%), rgb(7 11 25 / 92%)),
+    linear-gradient(180deg, rgb(16 27 44 / 86%), rgb(7 17 29 / 92%)),
     var(--brand-panel-2);
 }
 
@@ -2573,7 +2574,7 @@ body {
 .inline-inspector,
 .inline-inspector pre,
 .log-row pre {
-  border-color: rgb(124 161 255 / 12%);
+  border-color: var(--brand-line);
   background: rgb(5 8 23 / 82%);
 }
 
@@ -2586,19 +2587,18 @@ body {
 }
 
 .inline-inspector summary {
-  color: #c7b8ff;
+  color: #b4a7ff;
 }
 
 .inline-inspector.tool summary,
 .jump-live,
 .log-row strong {
-  color: #70e5ff !important;
+  color: #8bc8ff !important;
 }
 
 .live-logs {
   background:
-    linear-gradient(90deg, rgb(39 215 255 / 3%) 1px, transparent 1px) 0 0 / 64px 64px,
-    radial-gradient(circle at 100% 0%, rgb(155 92 255 / 7%), transparent 36%),
+    linear-gradient(90deg, rgb(148 163 184 / 3%) 1px, transparent 1px) 0 0 / 64px 64px,
     #050817;
 }
 
@@ -2613,9 +2613,9 @@ body {
 @keyframes activeNodePulse {
   0%,
   100% {
-    box-shadow: 0 0 0 1px rgb(39 215 255 / 14%), 0 0 28px rgb(155 92 255 / 18%);
+    box-shadow: 0 0 0 1px rgb(139 124 246 / 16%), 0 16px 42px rgb(0 0 0 / 26%);
   }
   50% {
-    box-shadow: 0 0 0 1px rgb(39 215 255 / 36%), 0 0 44px rgb(155 92 255 / 34%);
+    box-shadow: 0 0 0 1px rgb(139 124 246 / 34%), 0 18px 48px rgb(79 140 255 / 14%);
   }
 }
