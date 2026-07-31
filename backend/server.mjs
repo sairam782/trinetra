@@ -906,6 +906,11 @@ function recordLocalConsoleApproval(body, requestId) {
   if (!incidents[incidentKey]) throw new HttpError(400, `Unknown incidentKey: ${incidentKey || "missing"}`);
   if (!approvalRequestId) throw new HttpError(400, "requestId is required");
 
+  const existingApproval = signedApprovals.get(approvalKey(incidentKey, approvalRequestId));
+  if (existingApproval?.state === "approved") {
+    return existingApproval;
+  }
+
   const pending = pendingApprovalTimeouts.get(incidentKey);
   if (!pending || pending.requestId !== approvalRequestId || pending.state !== "pending") {
     throw new HttpError(409, "No matching pending approval gate is active for this run");
@@ -2543,9 +2548,12 @@ async function askRemediationToolAgent(incident, triage, gate, specialists, tran
       "Do not hallucinate tools."
     ].join(" ")
   }, () => fallbackStep, options);
+  const modelToolCalls = normalizeToolCalls(result.toolCalls || result.tools || result.tool_calls || []);
+  const toolCalls = modelToolCalls.length ? modelToolCalls : normalizeToolCalls(fallbackStep.toolCalls);
   return {
     ...result,
-    toolCalls: normalizeToolCalls(result.toolCalls || result.tools || result.tool_calls || fallbackStep.toolCalls)
+    toolCalls,
+    fallback: result.fallback || (modelToolCalls.length ? null : "Qwen returned no valid tool calls; used next registered fallback tool")
   };
 }
 
@@ -2606,10 +2614,11 @@ function normalizeToolCalls(toolCalls) {
 }
 
 function addTokenUsage(current, next = {}) {
+  const usage = next && typeof next === "object" ? next : {};
   return {
-    input: (current.input || 0) + (next.input || 0),
-    output: (current.output || 0) + (next.output || 0),
-    total: (current.total || 0) + (next.total || 0)
+    input: (current.input || 0) + (usage.input || 0),
+    output: (current.output || 0) + (usage.output || 0),
+    total: (current.total || 0) + (usage.total || 0)
   };
 }
 

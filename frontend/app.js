@@ -340,7 +340,6 @@ function render(data) {
 }
 
 function updatePipelineFromStream(event) {
-  const stage = stageForEvent(event);
   const previous = pipelineSnapshot || {
     mode: "running",
     activeStage: "ingest",
@@ -349,6 +348,7 @@ function updatePipelineFromStream(event) {
     sourceEvents: [],
     data: null
   };
+  const stage = nextPipelineStage(previous.activeStage, stageForEvent(event));
   pipelineSnapshot = {
     ...previous,
     mode: "running",
@@ -399,11 +399,12 @@ function renderLivePipeline(data = lastRunData) {
 function buildPipelineSnapshot(data) {
   const verificationText = `${data.verification?.status || ""} ${data.verification?.message || ""}`;
   const gateText = `${data.gate?.kind || ""} ${data.gate?.label || ""} ${verificationText}`;
-  const pausedAtGate = /human|approval|paused/i.test(gateText) && !/healthy|resolved|closed|success/i.test(verificationText);
+  const verified = data.verification?.healthy === true || /healthy|resolved|closed|success|verified|recovered/i.test(verificationText);
+  const pausedAtGate = /human|approval|paused/i.test(gateText) && !verified;
   const failed = /failed|unhealthy|rollback|escalate/i.test(verificationText);
   let activeStage = "done";
   if (pausedAtGate) activeStage = "gate";
-  else if (failed) activeStage = "verify";
+  else if (failed && !verified) activeStage = "verify";
   else if (!data.verification) activeStage = "gate";
   return {
     mode: "complete",
@@ -417,7 +418,8 @@ function buildPipelineSnapshot(data) {
 
 function stageForEvent(event = {}) {
   const text = `${event.type || ""} ${event.label || ""} ${event.role || ""} ${event.agent || ""} ${event.toolCall?.name || ""} ${event.toolExecution?.name || ""}`.toLowerCase();
-  if (/completed|incident closed|run completed|memory update/.test(text)) return "done";
+
+  if (/feedback to memory|memory update|documentation agent|communication agent|incident closed|run completed/.test(text)) return "done";
   if (/verify|verification|verify_demo/.test(text)) return "verify";
   if (/gate|approval|slack|remediation|tool|restore|restart|reload|pin_|clear_|enable_/.test(text)) return "gate";
   if (/triage|runbook/.test(text)) return "triage";
@@ -426,6 +428,15 @@ function stageForEvent(event = {}) {
   if (/commander/.test(text)) return "commander";
   if (/ingest|alert|incident|started|connected/.test(text)) return "ingest";
   return pipelineSnapshot?.activeStage || "ingest";
+}
+
+function nextPipelineStage(previousStage, candidateStage) {
+  if (!candidateStage) return previousStage || "ingest";
+  const previousIndex = pipelineStages.indexOf(previousStage);
+  const candidateIndex = pipelineStages.indexOf(candidateStage);
+  if (previousIndex < 0) return candidateStage;
+  if (candidateIndex < 0) return previousStage || "ingest";
+  return candidateIndex >= previousIndex ? candidateStage : previousStage;
 }
 
 function renderRouteBranches(snapshot) {
@@ -720,6 +731,16 @@ async function refreshDemoSiteStatus() {
     els.demoSiteText.textContent = status.healthy
       ? `Recovered from ${status.failureLabel}. /demo-store returns ${status.httpStatus}. Pipeline action: ${status.lastAction || "not yet"}.`
       : `${status.failureLabel} active. /demo-store returns ${status.httpStatus}: ${status.error}. ${status.symptom}`;
+    if (status.healthy && pipelineSnapshot && pipelineSnapshot.activeStage !== "done") {
+      pipelineSnapshot = {
+        ...pipelineSnapshot,
+        mode: "complete",
+        activeStage: "done"
+      };
+      selectedPipelineStage = "done";
+      pipelineSelectionManual = false;
+      renderPipeline();
+    }
   } catch {
     els.demoSiteTitle.textContent = "Storefront status: unknown";
     els.demoSiteTitle.className = "status-pill inactive";

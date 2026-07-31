@@ -2333,8 +2333,14 @@ body {
   align-items: center;
   gap: 10px;
   padding: 10px 0 2px;
-  color: var(--muted);
-  font-size: 0.76rem;
+  color: var(--soft);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.creator-credit strong {
+  color: var(--ink-primary);
+  font-weight: 900;
 }
 
 .creator-credit a {
@@ -2346,7 +2352,7 @@ body {
   border-radius: var(--radius);
   background: rgb(255 255 255 / 3%);
   color: var(--tool);
-  font-weight: 800;
+  font-weight: 900;
   text-decoration: none;
 }
 
