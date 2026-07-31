@@ -1571,7 +1571,7 @@ body {
 
 .pipeline-stage {
   display: grid;
-  grid-template-rows: auto auto auto minmax(132px, 1fr) auto minmax(120px, 0.72fr) auto;
+  grid-template-rows: auto auto auto minmax(132px, 1fr) auto auto minmax(120px, 0.72fr) auto;
   gap: 10px;
   padding: 12px;
 }
@@ -1733,6 +1733,45 @@ body {
   border-style: dashed;
   opacity: 0.42;
   text-decoration: line-through;
+}
+
+.local-approval-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid rgb(213 154 46 / 38%);
+  border-radius: 8px;
+  background: rgb(213 154 46 / 9%);
+  box-shadow: inset 3px 0 0 var(--brand-amber, #d59a2e);
+}
+
+.local-approval-card span,
+.local-approval-card em {
+  color: #d59a2e;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-style: normal;
+}
+
+.local-approval-card strong {
+  display: block;
+  margin-top: 3px;
+  color: #f8fafc;
+  font-size: 0.92rem;
+}
+
+.local-approval-card p {
+  margin: 3px 0 0;
+  color: #a5b4c7;
+  line-height: 1.4;
+}
+
+.local-approval-card button {
+  white-space: nowrap;
 }
 
 .pipeline-flow {
@@ -2342,7 +2381,7 @@ body {
   }
 
   .pipeline-stage {
-    grid-template-rows: auto auto auto minmax(160px, 1fr) auto minmax(180px, 1fr) auto;
+    grid-template-rows: auto auto auto minmax(160px, 1fr) auto auto minmax(180px, 1fr) auto;
   }
 
   .control-field,
@@ -2375,7 +2414,8 @@ body {
 
   .detail-grid,
   .event-receipt,
-  .log-row summary {
+  .log-row summary,
+  .local-approval-card {
     grid-template-columns: 1fr;
   }
 

@@ -531,6 +531,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/approvals/local") {
+      const body = await readJson(req);
+      const approval = recordLocalConsoleApproval(body, requestId);
+      sendJson(res, 200, { approval }, requestId);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/slack/status") {
       sendJson(res, 200, slackApprovalStatus(), requestId);
       return;
@@ -891,6 +898,35 @@ function resolveSignedApproval(incidentKey, requestId) {
     return { approval: "pending", approverId: null, source: "none" };
   }
   return { approval: "approved", approverId: approval.approverId, source: approval.source, approvedAt: approval.approvedAt };
+}
+
+function recordLocalConsoleApproval(body, requestId) {
+  const incidentKey = typeof body.incidentKey === "string" ? body.incidentKey : "";
+  const approvalRequestId = typeof body.requestId === "string" ? body.requestId : "";
+  if (!incidents[incidentKey]) throw new HttpError(400, `Unknown incidentKey: ${incidentKey || "missing"}`);
+  if (!approvalRequestId) throw new HttpError(400, "requestId is required");
+
+  const pending = pendingApprovalTimeouts.get(incidentKey);
+  if (!pending || pending.requestId !== approvalRequestId || pending.state !== "pending") {
+    throw new HttpError(409, "No matching pending approval gate is active for this run");
+  }
+
+  const approval = {
+    incidentKey,
+    approverId: "local-console-reviewer",
+    state: "approved",
+    source: "local-console",
+    approvedAt: new Date().toISOString(),
+    requestId: approvalRequestId,
+    actionId: "approve_remediation"
+  };
+  signedApprovals.set(approvalKey(incidentKey, approvalRequestId), approval);
+  clearPendingApprovalTimeout(incidentKey);
+  void logger.info("local_console_approval_recorded", {
+    ...approval,
+    apiRequestId: requestId
+  }).catch(() => {});
+  return approval;
 }
 
 function slackApprovalStatus(env = process.env) {
@@ -1395,7 +1431,7 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
     mcp: useMcp(mcpTrace, "memory", "semantic_search", `${runbook.id} matched for ${incident.service}`)
   }));
 
-  const gate = chooseGate(commander, runbook, triage, approval, approverId);
+  const gate = chooseGate(commander, runbook, triage, approval, approverId, approvalState.source);
   emitStreamEvent(emit, "gate_decided", "Remediation gate decided", { gate });
   let approvalMcp = null;
   if (gate.kind === "human") {
@@ -2660,10 +2696,12 @@ function runToolRollback({ incident, gate, triage, timeline, toolsExecuted, tran
   return { healthy: verifyResult.healthy, lastResult: verifyResult };
 }
 
-function chooseGate(commander, runbook, triage, approval, approverId) {
+function chooseGate(commander, runbook, triage, approval, approverId, approvalSource = "none") {
   const allowedRunbook = runbook.approved && approvedRunbookAllowlist.has(runbook.id);
   const highConfidence = triage.confidence >= autoExecuteThreshold;
   const realBlastRadius = ["global", "us-east-1, us-west-2"].includes(String(commander.blastRadius));
+  const authorizedApproval = approval === "approved" && (slackApproverAllowlist.includes(approverId) || approvalSource === "local-console");
+  const approvalActor = approvalSource === "local-console" ? "local console reviewer" : approverId;
   if (highConfidence && allowedRunbook && runbook.risk === "low" && !realBlastRadius && commander.severity !== "P1") {
     return {
       kind: "auto",
@@ -2687,28 +2725,27 @@ function chooseGate(commander, runbook, triage, approval, approverId) {
     };
   }
   if (runbook.risk === "high" || commander.severity === "P1" || realBlastRadius || runbook.risk === "medium") {
-    const approved = approval === "approved" && slackApproverAllowlist.includes(approverId);
     return {
-      kind: approved ? "approved" : "human",
-      label: approved ? "Human approved remediation" : "Waiting for Slack approval",
-      confidence: approved ? triage.confidence : Math.min(0.86, triage.confidence),
-      action: approved ? `Proceeding with gated fix approved by ${approverId}` : `Approval required from allowlisted Slack users: ${slackApproverAllowlist.join(", ")}`,
+      kind: authorizedApproval ? "approved" : "human",
+      label: authorizedApproval ? "Human approved remediation" : "Waiting for approval",
+      confidence: authorizedApproval ? triage.confidence : Math.min(0.86, triage.confidence),
+      action: authorizedApproval ? `Proceeding with gated fix approved by ${approvalActor}` : `Approval required from Slack or the local demo approval panel`,
       deployAction: runbook.actionType,
       runbook,
-      reason: approved
-        ? `authorized approver ${approverId}, confidence ${triage.confidence}, blast radius ${commander.blastRadius}`
-        : `mid/high risk or real blast radius requires Slack approval; timeout escalates to on-call`
+      reason: authorizedApproval
+        ? `authorized approval source ${approvalSource}, approver ${approvalActor}, confidence ${triage.confidence}, blast radius ${commander.blastRadius}`
+        : `mid/high risk or real blast radius requires approval; timeout escalates to on-call`
     };
   }
-  if (approval === "approved" && slackApproverAllowlist.includes(approverId)) {
+  if (authorizedApproval) {
     return {
       kind: "approved",
       label: "Human approved remediation",
       confidence: triage.confidence,
-      action: `Proceeding with approved low-risk fix approved by ${approverId}`,
+      action: `Proceeding with approved low-risk fix approved by ${approvalActor}`,
       deployAction: runbook.actionType,
       runbook,
-      reason: `authorized approver ${approverId}, low-risk runbook ${runbook.id}, confidence ${triage.confidence}`
+      reason: `authorized approval source ${approvalSource}, approver ${approvalActor}, low-risk runbook ${runbook.id}, confidence ${triage.confidence}`
     };
   }
   return {

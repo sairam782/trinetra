@@ -67,6 +67,11 @@ const els = {
   statusPanel: document.querySelector("#statusPanel"),
   qwenPanel: document.querySelector("#qwenPanel"),
   apiStatusRows: document.querySelector("#apiStatusRows"),
+  localApprovalCard: document.querySelector("#localApprovalCard"),
+  localApprovalTitle: document.querySelector("#localApprovalTitle"),
+  localApprovalText: document.querySelector("#localApprovalText"),
+  approveLocalButton: document.querySelector("#approveLocalButton"),
+  localApprovalStatus: document.querySelector("#localApprovalStatus"),
   pipelineFlow: document.querySelector("#pipelineFlow"),
   pipelineDetails: document.querySelector("#pipelineDetails"),
   fastPathBranch: document.querySelector("#fastPathBranch"),
@@ -101,6 +106,7 @@ els.runButton.addEventListener("click", runAgents);
 els.incidentSelect.addEventListener("change", resetPipelineForSelectionChange);
 els.injectErrorButton.addEventListener("click", injectDemoError);
 els.solveWebsiteButton.addEventListener("click", solveWebsiteIncident);
+els.approveLocalButton.addEventListener("click", approveLocalRemediation);
 els.refreshLogsButton.addEventListener("click", refreshLogs);
 els.logSearch.addEventListener("input", () => renderLogs(currentLogs));
 els.jumpToLiveButton.addEventListener("click", () => {
@@ -329,6 +335,7 @@ function render(data) {
   renderMcpTrace(mcpTrace);
   renderExecutionGraph(data);
   renderLivePipeline(data);
+  renderLocalApprovalCard(data);
   refreshRecentRuns();
 }
 
@@ -741,6 +748,7 @@ async function injectDemoError() {
   });
   els.incidentSelect.value = "website";
   resetPipelineForInjectedFailure();
+  renderLocalApprovalCard(null);
   await refreshDemoSiteStatus();
   await refreshLogs();
 }
@@ -765,6 +773,7 @@ function resetPipelineForInjectedFailure() {
     data: null
   };
   renderLivePipeline();
+  renderLocalApprovalCard(null);
   els.pipelineDetails.innerHTML = `
     <div class="detail-empty">
       <strong>Failure injected into target website</strong>
@@ -790,6 +799,7 @@ function resetPipelineForSelectionChange() {
     data: null
   };
   renderLivePipeline();
+  renderLocalApprovalCard(null);
   els.pipelineDetails.innerHTML = `
     <div class="detail-empty">
       <strong>Pipeline idle</strong>
@@ -834,15 +844,16 @@ async function refreshApprovals() {
     if (autoResumedApprovalIds.has(approvalKey)) return;
     autoResumedApprovalIds.add(approvalKey);
     appendLiveTimelineEvent({
-      type: "slack_approval_recorded",
-      label: `Slack approval recorded from ${valueOrNA(approval.approverId)}`,
+      type: "approval_recorded",
+      label: `${approvalSourceLabel(approval.source)} approval recorded from ${valueOrNA(approval.approverId)}`,
       timestamp: approval.approvedAt
     });
     updatePipelineFromStream({
       type: "approval",
-      label: "Slack approval recorded; resuming pipeline",
+      label: `${approvalSourceLabel(approval.source)} approval recorded; resuming pipeline`,
       timestamp: approval.approvedAt
     });
+    renderLocalApprovalCard(null, "Approval recorded. Resuming pipeline...");
     await runAgents({ approvalRequestId: approval.requestId });
     await refreshDemoSiteStatus();
   } catch (error) {
@@ -850,10 +861,68 @@ async function refreshApprovals() {
   }
 }
 
+async function approveLocalRemediation() {
+  if (!isPipelineWaitingForApproval(lastRunData)) return;
+  const incidentKey = lastRunData?.incidentKey || els.incidentSelect.value;
+  const requestId = lastRunData?.requestId || null;
+  if (!incidentKey || !requestId) return;
+  els.approveLocalButton.disabled = true;
+  els.localApprovalStatus.textContent = "Recording local approval...";
+  try {
+    const result = await fetchJson("/api/approvals/local", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ incidentKey, requestId })
+    });
+    const approval = result.approval;
+    const approvalKey = `${approval.incidentKey}:${approval.requestId}:${approval.approvedAt}`;
+    autoResumedApprovalIds.add(approvalKey);
+    appendLiveTimelineEvent({
+      type: "local_console_approval_recorded",
+      label: `Local console approval recorded for ${approval.incidentKey}`,
+      timestamp: approval.approvedAt
+    });
+    updatePipelineFromStream({
+      type: "approval",
+      label: "Local console approval recorded; resuming pipeline",
+      timestamp: approval.approvedAt
+    });
+    renderLocalApprovalCard(null, "Approved locally. Resuming remediation...");
+    await runAgents({ approvalRequestId: approval.requestId });
+    await refreshDemoSiteStatus();
+  } catch (error) {
+    console.warn(error);
+    els.approveLocalButton.disabled = false;
+    els.localApprovalStatus.textContent = error.message || "Local approval failed";
+  }
+}
+
 function isPipelineWaitingForApproval(data) {
   if (!data) return false;
   const gateText = `${data.gate?.kind || ""} ${data.gate?.label || ""} ${data.verification?.status || ""} ${data.verification?.message || ""}`;
   return /human|approval|paused/i.test(gateText) && !/approved|healthy|resolved|closed|success/i.test(gateText);
+}
+
+function renderLocalApprovalCard(data = lastRunData, statusText = "") {
+  const waiting = isPipelineWaitingForApproval(data);
+  els.localApprovalCard.classList.toggle("hidden", !waiting && !statusText);
+  els.approveLocalButton.disabled = !waiting || pipelineRunning;
+  if (!waiting && !statusText) return;
+  const incident = data?.incident;
+  els.localApprovalTitle.textContent = waiting
+    ? `${incident?.id || "Incident"} is waiting for approval`
+    : "Approval recorded";
+  els.localApprovalText.textContent = waiting
+    ? `${incident?.service || "Service"} requires a human gate before remediation. Use this local approval when a reviewer cannot access the configured Slack workspace.`
+    : "The approval was recorded locally for this demo run.";
+  els.localApprovalStatus.textContent = statusText || `Request ${valueOrNA(data?.requestId)}`;
+}
+
+function approvalSourceLabel(source) {
+  if (source === "local-console") return "Local console";
+  if (source === "slack-reaction") return "Slack reaction";
+  if (source === "slack-signed") return "Slack";
+  return "Human";
 }
 
 function renderRealtimeStatus(status) {
@@ -1479,6 +1548,7 @@ function setLoading(isLoading) {
   document.body.classList.toggle("pipeline-running", isLoading);
   els.runButton.disabled = isLoading;
   els.solveWebsiteButton.disabled = isLoading;
+  els.approveLocalButton.disabled = isLoading || !isPipelineWaitingForApproval(lastRunData);
   if (isLoading) {
     els.runButton.textContent = currentMode === "realtime" ? "Probing..." : "Running...";
     els.solveWebsiteButton.textContent = "Running...";

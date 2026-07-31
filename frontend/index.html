@@ -113,6 +113,16 @@
           <div id="escalateGateBranch" class="branch-path pending"><span>Escalate only</span></div>
         </div>
 
+        <aside id="localApprovalCard" class="local-approval-card hidden" aria-live="polite">
+          <div>
+            <span>Local approval fallback</span>
+            <strong id="localApprovalTitle">Approval required</strong>
+            <p id="localApprovalText">This browser approval is for demos when the reviewer cannot access the Slack workspace.</p>
+          </div>
+          <button id="approveLocalButton" class="primary-action" type="button">Approve in Trinetra</button>
+          <em id="localApprovalStatus">Waiting for reviewer action</em>
+        </aside>
+
         <article id="pipelineDetails" class="pipeline-details" aria-live="polite">
           <div class="detail-empty">
             <strong>Waiting for pipeline execution</strong>
