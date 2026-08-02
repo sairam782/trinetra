@@ -15,7 +15,8 @@ loadEnvFile();
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = join(__dirname, "..");
 const publicDir = join(repoRoot, "frontend");
-const dataDir = join(repoRoot, "data");
+const isVercel = process.env.VERCEL === "1" || process.env.VERCEL === "true";
+const dataDir = isVercel ? join("/tmp", "trinetra-data") : join(repoRoot, "data");
 const auditLogPath = join(dataDir, "incident-runs.jsonl");
 const backendLogPath = join(dataDir, "backend-events.jsonl");
 const memoryStorePath = join(dataDir, "historical-memory.json");
@@ -436,7 +437,7 @@ const mcpRegistry = [
   { id: "pager", name: "PagerDuty MCP", category: "escalation", status: "simulated", actions: ["page_oncall", "escalate_policy"] }
 ];
 
-const server = http.createServer(async (req, res) => {
+const requestHandler = async (req, res) => {
   const requestId = crypto.randomUUID();
   const requestStartedAt = Date.now();
   res.on("finish", () => {
@@ -721,19 +722,34 @@ const server = http.createServer(async (req, res) => {
     }).catch(() => {});
     sendJson(res, 500, { error: "Unexpected server error", requestId }, requestId);
   }
-});
+};
 
-server.listen(port, host, () => {
+const server = http.createServer(requestHandler);
+
+if (!isVercel) {
+  server.listen(port, host, () => {
+    void logger.info("server_started", {
+      host,
+      port,
+      mode: deploymentMode,
+      qwenLive: qwenConfig.liveEnabled,
+      remediationExecutionMode
+    }).catch(() => {});
+    console.log(`Trinetra running at http://${host}:${port}`);
+    startSyntheticMonitor();
+  });
+} else {
   void logger.info("server_started", {
-    host,
-    port,
+    host: "vercel",
+    port: null,
     mode: deploymentMode,
     qwenLive: qwenConfig.liveEnabled,
-    remediationExecutionMode
+    remediationExecutionMode,
+    runtime: "vercel"
   }).catch(() => {});
-  console.log(`Trinetra running at http://${host}:${port}`);
-  startSyntheticMonitor();
-});
+}
+
+export default requestHandler;
 
 async function readJson(req) {
   const raw = await readRawBody(req);
