@@ -1,4 +1,8 @@
 # Trinetra
+> Autonomous AI Incident Response Platform
+
+Detect. Diagnose. Decide. Recover.
+
 
 Trinetra is an AI incident-response console for a breakable demo storefront. It ingests an incident, runs Qwen-backed agents over logs, metrics, traces, and memory, selects an approved runbook, waits at a human gate when risk requires it, executes only registered remediation tools, verifies recovery, and persists the full audit trail.
 
@@ -363,3 +367,10 @@ Recommended rollout order:
 - Slack approvals must be signed or reaction-verified.
 - Local browser approvals only work for the currently pending run ID.
 - Verification is required before resolution.
+
+## Author
+
+**Abhishek Sairam Gaduputi**
+
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Abhishek%20Sairam%20Gaduputi-blue?logo=linkedin)](https://www.linkedin.com/in/abhishek-sairam-gaduputi-23899b175/)
+[![GitHub](https://img.shields.io/badge/GitHub-sairam782-black?logo=github)](https://github.com/sairam782)
