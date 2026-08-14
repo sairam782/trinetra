@@ -20,12 +20,17 @@ const dataDir = isVercel ? join("/tmp", "trinetra-data") : join(repoRoot, "data"
 const auditLogPath = join(dataDir, "incident-runs.jsonl");
 const backendLogPath = join(dataDir, "backend-events.jsonl");
 const memoryStorePath = join(dataDir, "historical-memory.json");
-const port = Number(process.env.PORT || 4173);
+function parseFiniteNumber(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+const port = parseFiniteNumber(process.env.PORT, 4173);
 const host = process.env.HOST || "127.0.0.1";
 const startedAt = new Date();
-const maxBodyBytes = Number(process.env.MAX_BODY_BYTES || 64_000);
+const maxBodyBytes = parseFiniteNumber(process.env.MAX_BODY_BYTES, 64_000);
 const deploymentMode = process.env.NODE_ENV === "production" ? "production" : "development";
-const autoExecuteThreshold = Number(process.env.AUTO_EXECUTE_CONFIDENCE_THRESHOLD || 0.9);
+const autoExecuteThreshold = parseFiniteNumber(process.env.AUTO_EXECUTE_CONFIDENCE_THRESHOLD, 0.9);
 const approvedRunbookAllowlist = new Set((process.env.RUNBOOK_ALLOWLIST || "RB-101,RB-204,RB-330,RB-401,RB-510,RB-777").split(",").map((item) => item.trim()).filter(Boolean));
 const slackApproverAllowlist = (process.env.SLACK_APPROVER_IDS || "U-HACK-JUDGE,U-ONCALL-PRIMARY").split(",").map((item) => item.trim()).filter(Boolean);
 const slackSigningSecret = process.env.SLACK_SIGNING_SECRET || "";
@@ -46,9 +51,9 @@ const qwenModels = {
   triage: process.env.QWEN_MODEL_TRIAGE || process.env.QWEN_MODEL_DEFAULT || "qwen-plus",
   documentation: process.env.QWEN_MODEL_DOCUMENTATION || process.env.QWEN_MODEL_DEFAULT || "qwen-plus"
 };
-const dedupeWindowMs = Number(process.env.DEDUPE_WINDOW_MS || 180_000);
-const verificationTimeoutMs = Number(process.env.VERIFICATION_TIMEOUT_MS || 30_000);
-const syntheticCheckIntervalMs = Number(process.env.SYNTHETIC_CHECK_INTERVAL_MS || 10_000);
+const dedupeWindowMs = parseFiniteNumber(process.env.DEDUPE_WINDOW_MS, 180_000);
+const verificationTimeoutMs = parseFiniteNumber(process.env.VERIFICATION_TIMEOUT_MS, 30_000);
+const syntheticCheckIntervalMs = parseFiniteNumber(process.env.SYNTHETIC_CHECK_INTERVAL_MS, 10_000);
 const dedupeCache = new Map();
 const signedApprovals = new Map();
 const pendingApprovalTimers = new Map();
@@ -677,7 +682,7 @@ const requestHandler = async (req, res) => {
       res.writeHead(demoSiteStatus().httpStatus, securityHeaders({
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store"
-      }, requestId));
+      }, requestId, { csp: demoStoreCsp }));
       res.end(html);
       return;
     }
@@ -776,16 +781,20 @@ function sendJson(res, status, payload, requestId = crypto.randomUUID()) {
   res.end(JSON.stringify(payload));
 }
 
-function securityHeaders(headers, requestId) {
+function securityHeaders(headers, requestId, options = {}) {
+  const csp = options.csp
+    || "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'";
   return {
     ...headers,
     "x-request-id": requestId,
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
     "permissions-policy": "camera=(), microphone=(), geolocation=()",
-    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+    "content-security-policy": csp
   };
 }
+
+const demoStoreCsp = "default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 function validateAnalyzeRequest(body) {
   const incidentKey = typeof body.incidentKey === "string" ? body.incidentKey : "latency";
@@ -1534,7 +1543,7 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
       cost: 0.003,
       model: qwenModels.documentation,
       tokens: tokenUsage(audit.map((item) => item.output).join(" "), "postmortem timeline"),
-      reasoning: "Long-form postmortem writing uses qwen3.6-plus",
+      reasoning: `Long-form postmortem writing uses ${qwenModels.documentation}`,
       mcp: useMcp(mcpTrace, "docs", "write_timeline", "published reasoning trail draft")
     }));
   }
@@ -2377,6 +2386,7 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
   let totalTokens = { input: 0, output: 0, total: 0 };
   let provider = "local-fallback";
   let fallbackReason = null;
+  const maxToolExecutions = 12;
 
   for (let iteration = 0; iteration < 6; iteration += 1) {
     const agentStep = await askRemediationToolAgent(incident, triage, gate, specialists, transcript, fallback, options);
@@ -2395,6 +2405,28 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
     }
 
     for (const call of toolCalls) {
+      if (toolsExecuted.length >= maxToolExecutions) {
+        timeline.push({ status: "blocked", label: "Tool execution cap reached", detail: `Refusing further tool calls after ${maxToolExecutions} executions` });
+        finalResponse = {
+          status: "escalate_to_human",
+          reasoning: `Tool execution cap of ${maxToolExecutions} reached before verification passed`,
+          confidence: 0.6
+        };
+        break;
+      }
+      const lastExecution = toolsExecuted.at(-1);
+      const callArgsSignature = JSON.stringify(call.args || {});
+      const lastArgsSignature = lastExecution ? JSON.stringify(lastExecution.args || {}) : null;
+      if (lastExecution && lastExecution.name === call.name && lastArgsSignature === callArgsSignature) {
+        const dedupeResult = {
+          tool: call.name,
+          success: false,
+          message: `Skipped duplicate consecutive call to '${call.name}'`
+        };
+        transcript.push({ role: "tool", name: call.name, result: dedupeResult });
+        timeline.push({ status: "blocked", label: `Skipped duplicate tool: ${call.name}()`, detail: dedupeResult.message });
+        continue;
+      }
       if (!remediationTools[call.name]) {
         const rejected = {
           tool: call.name,
@@ -2721,10 +2753,22 @@ function runToolRollback({ incident, gate, triage, timeline, toolsExecuted, tran
   return { healthy: verifyResult.healthy, lastResult: verifyResult };
 }
 
+function isRealBlastRadius(value) {
+  if (Array.isArray(value)) {
+    const regions = value.map((entry) => String(entry).trim().toLowerCase()).filter(Boolean);
+    return regions.includes("global") || regions.length >= 2;
+  }
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized === "global") return true;
+  const regions = normalized.split(/[,;\s]+/).map((entry) => entry.trim()).filter(Boolean);
+  return regions.length >= 2;
+}
+
 function chooseGate(commander, runbook, triage, approval, approverId, approvalSource = "none") {
   const allowedRunbook = runbook.approved && approvedRunbookAllowlist.has(runbook.id);
   const highConfidence = triage.confidence >= autoExecuteThreshold;
-  const realBlastRadius = ["global", "us-east-1, us-west-2"].includes(String(commander.blastRadius));
+  const realBlastRadius = isRealBlastRadius(commander.blastRadius);
   const authorizedApproval = approval === "approved" && (slackApproverAllowlist.includes(approverId) || approvalSource === "local-console");
   const approvalActor = approvalSource === "local-console" ? "local console reviewer" : approverId;
   if (highConfidence && allowedRunbook && runbook.risk === "low" && !realBlastRadius && commander.severity !== "P1") {
@@ -3229,13 +3273,13 @@ function renderDemoStore() {
     </style>
   </head>
   <body>
-    <header><strong>Northstar Outdoor Co.</strong> <span class="badge">Synthetic check failed: ${failure.httpStatus}</span></header>
+    <header><strong>Northstar Outdoor Co.</strong> <span class="badge">Synthetic check failed: ${escapeHtml(failure.httpStatus)}</span></header>
     <main>
       <section>
       <p>Demo storefront</p>
-      <h1>${failure.label}</h1>
-      <p>${failure.symptom}</p>
-      <code>${validation.error}</code>
+      <h1>${escapeHtml(failure.label)}</h1>
+      <p>${escapeHtml(failure.symptom)}</p>
+      <code>${escapeHtml(validation.error)}</code>
       <p><a href="/">Open Trinetra</a> to diagnose and remediate this incident.</p>
       <div class="grid">
         <div class="tile"><h3>Trail Pack</h3><p>Unavailable while incident is active.</p></div>
@@ -3245,8 +3289,8 @@ function renderDemoStore() {
       </section>
       <aside>
         <h2>Incident signal</h2>
-        <p>${failure.metricFinding}</p>
-        <p><strong>Likely fix:</strong> ${failure.runbookTitle}</p>
+        <p>${escapeHtml(failure.metricFinding)}</p>
+        <p><strong>Likely fix:</strong> ${escapeHtml(failure.runbookTitle)}</p>
       </aside>
     </main>
   </body>
