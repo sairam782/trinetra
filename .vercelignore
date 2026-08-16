@@ -1,11 +1,13 @@
 .env
 .env.*
 .git
+.github
 .DS_Store
 data
 node_modules
 coverage
 dist
+test
 npm-debug.log*
 cloudflared*.log
 localtunnel*.log
