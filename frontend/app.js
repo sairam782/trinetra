@@ -88,8 +88,6 @@ let selectedPipelineStage = "ingest";
 let pipelineSelectionManual = false;
 let pipelineSnapshot = null;
 let currentMode = "demo";
-let realtimeTimer = null;
-let logTimer = null;
 let lastRunData = null;
 let currentLogs = [];
 let liveTimelineEvents = [];
@@ -143,8 +141,39 @@ resetPipelineForSelectionChange();
 refreshOpsStatus();
 refreshDemoSiteStatus();
 refreshLogs();
-logTimer = setInterval(refreshLogs, 6000);
-setInterval(refreshApprovals, 2500);
+
+const pollers = {
+  logs: { intervalMs: 6000, fn: refreshLogs, handle: null },
+  approvals: { intervalMs: 2500, fn: refreshApprovals, handle: null },
+  realtime: { intervalMs: 4000, fn: refreshRealtimeStatus, handle: null, active: false }
+};
+
+function startPoller(name) {
+  const poller = pollers[name];
+  if (!poller || poller.handle) return;
+  if (document.hidden) return;
+  poller.handle = setInterval(poller.fn, poller.intervalMs);
+}
+
+function stopPoller(name) {
+  const poller = pollers[name];
+  if (!poller?.handle) return;
+  clearInterval(poller.handle);
+  poller.handle = null;
+}
+
+startPoller("logs");
+startPoller("approvals");
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    for (const name of Object.keys(pollers)) stopPoller(name);
+    return;
+  }
+  startPoller("logs");
+  startPoller("approvals");
+  if (pollers.realtime.active) startPoller("realtime");
+});
 
 function setMode(mode) {
   currentMode = mode;
@@ -155,14 +184,13 @@ function setMode(mode) {
   els.realtimePanel.classList.toggle("hidden", !realtime);
   els.runButton.textContent = realtime ? "Run realtime probe" : "Run demo pipeline";
 
+  stopPoller("realtime");
+  pollers.realtime.active = realtime;
   if (realtime) {
     els.incidentSelect.value = "website";
     refreshRealtimeStatus();
     refreshDemoSiteStatus();
-    realtimeTimer = setInterval(refreshRealtimeStatus, 4000);
-  } else if (realtimeTimer) {
-    clearInterval(realtimeTimer);
-    realtimeTimer = null;
+    startPoller("realtime");
   }
 }
 
@@ -179,7 +207,8 @@ async function runAgents(options = {}) {
     try {
       data = await streamIncidentAnalysis(payload);
     } catch (streamError) {
-      console.warn(streamError);
+      if (!isTransportError(streamError)) throw streamError;
+      console.warn("stream transport failed; falling back to POST /analyze:", streamError);
       data = await fetchJson("/api/incidents/analyze", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -198,13 +227,35 @@ async function runAgents(options = {}) {
   }
 }
 
+function transportError(message, cause) {
+  const err = new Error(message);
+  err.transport = true;
+  if (cause) err.cause = cause;
+  return err;
+}
+
+function isTransportError(err) {
+  return Boolean(err?.transport);
+}
+
 async function streamIncidentAnalysis(payload) {
-  const response = await fetch("/api/incidents/analyze/stream", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-  if (!response.ok || !response.body) throw new Error(`stream failed: ${response.status}`);
+  let response;
+  try {
+    response = await fetch("/api/incidents/analyze/stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  } catch (networkError) {
+    throw transportError(`stream transport failed: ${networkError?.message || networkError}`, networkError);
+  }
+  if (!response.body) throw transportError(`stream returned no body (status ${response.status})`);
+  if (!response.ok) {
+    if (response.status >= 500) throw transportError(`stream returned ${response.status}`);
+    let bodyText = "";
+    try { bodyText = await response.text(); } catch { /* ignore */ }
+    throw new Error(`stream rejected with ${response.status}: ${bodyText.slice(0, 200)}`);
+  }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -229,7 +280,7 @@ async function streamIncidentAnalysis(payload) {
       }
     }
   }
-  if (!finalResult) throw new Error("stream ended without final result");
+  if (!finalResult) throw transportError("stream ended without final result");
   return finalResult;
 }
 
@@ -1062,35 +1113,9 @@ function renderApiStatusRows({ health, readiness, healthError, readinessError } 
 }
 
 async function fetchJson(url, options = {}) {
-  if (typeof window.fetch === "function") {
-    const response = await window.fetch(url, options);
-    if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
-    return response.json();
-  }
-  return xhrJson(url, options);
-}
-
-function xhrJson(url, options = {}) {
-  return new Promise((resolve, reject) => {
-    const request = new XMLHttpRequest();
-    request.open(options.method || "GET", url);
-    for (const [key, value] of Object.entries(options.headers || {})) {
-      request.setRequestHeader(key, value);
-    }
-    request.onload = () => {
-      if (request.status < 200 || request.status >= 300) {
-        reject(new Error(`${url} failed: ${request.status}`));
-        return;
-      }
-      try {
-        resolve(JSON.parse(request.responseText || "null"));
-      } catch {
-        reject(new Error(`${url} returned invalid JSON`));
-      }
-    };
-    request.onerror = () => reject(new Error(`${url} network error`));
-    request.send(options.body || null);
-  });
+  const response = await window.fetch(url, options);
+  if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
+  return response.json();
 }
 
 function renderAgents(specialists) {
