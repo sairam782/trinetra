@@ -64,7 +64,13 @@ async function checkPrometheus(env) {
   return connected("metrics", `series=${payload.data?.result?.length ?? 0}`);
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = Number(process.env.MCP_HEALTH_TIMEOUT_MS || 6000)) {
+function parseFiniteNumber(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = parseFiniteNumber(process.env.MCP_HEALTH_TIMEOUT_MS, 6000)) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
