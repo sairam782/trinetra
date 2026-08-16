@@ -1,3 +1,8 @@
+# Render Blueprint. Deploys the "final state" from the README's
+# Incubation Path: QWEN_LIVE_CALLS=true and REMEDIATION_EXECUTION_MODE=execute.
+# If you want the shadow-mode / dry-run rollout described in the README, flip
+# QWEN_LIVE_CALLS to "false" and REMEDIATION_EXECUTION_MODE to "dry-run"
+# before promoting the blueprint.
 services:
   - type: web
     name: trinetra

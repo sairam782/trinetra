@@ -337,6 +337,12 @@ This repo includes `render.yaml` for a free Render web service.
 https://your-render-service.onrender.com/api/slack/interactions
 ```
 
+**What `render.yaml` deploys.** The blueprint provisions the "final state" from
+the Incubation Path below: `QWEN_LIVE_CALLS=true` and
+`REMEDIATION_EXECUTION_MODE=execute`. If you want the shadow-mode / dry-run
+rollout instead, flip both values in `render.yaml` before promoting the
+blueprint.
+
 More details: [deploy/render/README.md](deploy/render/README.md).
 
 ## Docker
@@ -345,6 +351,27 @@ More details: [deploy/render/README.md](deploy/render/README.md).
 docker build -t trinetra .
 docker run --rm -p 4173:4173 trinetra
 ```
+
+`.dockerignore` excludes `.env`, `.env.*`, and `test/` so a local `.env` with
+real credentials is never baked into the image. Pass runtime configuration
+via `docker run -e KEY=value` or an `--env-file`.
+
+## Vercel note
+
+`vercel.json` wires the whole app to a single serverless function. That
+runtime is **not** recommended for the full flow: `signedApprovals`,
+`pendingApprovalTimeouts`, `dedupeCache`, and the demo storefront config all
+live in module-level state, and Vercel invocations don't share memory. On
+Vercel:
+
+- Local browser approvals recorded in one request are invisible to the next.
+- Demo storefront mutations from the tool executor do not persist across
+  requests.
+- `verify_demo` will observe the default healthy config regardless of what
+  ran before it.
+
+Prefer Render, Docker, or a long-lived Node process for anything past the
+static UI.
 
 ## Incubation Path
 
