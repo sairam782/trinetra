@@ -56,9 +56,14 @@ const verificationTimeoutMs = parseFiniteNumber(process.env.VERIFICATION_TIMEOUT
 const syntheticCheckIntervalMs = parseFiniteNumber(process.env.SYNTHETIC_CHECK_INTERVAL_MS, 10_000);
 const dedupeCache = new Map();
 const signedApprovals = new Map();
+const signedApprovalsMax = Math.max(50, parseFiniteNumber(process.env.SIGNED_APPROVALS_MAX, 500));
 const pendingApprovalTimers = new Map();
 const pendingApprovalTimeouts = new Map();
 const pendingSlackReactionTimers = new Map();
+const analyzeRateLimitWindowMs = Math.max(1000, parseFiniteNumber(process.env.ANALYZE_RATE_LIMIT_WINDOW_MS, 60_000));
+const analyzeRateLimitMax = Math.max(1, parseFiniteNumber(process.env.ANALYZE_RATE_LIMIT_MAX, 20));
+const analyzeRateLimitBuckets = new Map();
+const streamHeartbeatIntervalMs = Math.max(2000, parseFiniteNumber(process.env.STREAM_HEARTBEAT_INTERVAL_MS, 15_000));
 const logger = createLogger({
   path: backendLogPath,
   consoleEnabled: process.env.LOG_TO_CONSOLE !== "false"
@@ -605,6 +610,12 @@ const requestHandler = async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/api/incidents/analyze") {
+      const rateLimit = checkAnalyzeRateLimit(req);
+      if (!rateLimit.allowed) {
+        res.setHeader("retry-after", Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000)));
+        sendJson(res, 429, { error: "Too many analyze requests; retry shortly", requestId }, requestId);
+        return;
+      }
       const body = await readJson(req);
       void logger.info("incident_analyze_started", {
         requestId,
@@ -629,6 +640,12 @@ const requestHandler = async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/api/incidents/analyze/stream") {
+      const rateLimit = checkAnalyzeRateLimit(req);
+      if (!rateLimit.allowed) {
+        res.setHeader("retry-after", Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000)));
+        sendJson(res, 429, { error: "Too many analyze requests; retry shortly", requestId }, requestId);
+        return;
+      }
       const body = await readJson(req);
       res.writeHead(200, securityHeaders({
         "content-type": "text/event-stream; charset=utf-8",
@@ -640,6 +657,10 @@ const requestHandler = async (req, res) => {
         res.write(`event: ${event}\n`);
         res.write(`data: ${JSON.stringify({ requestId, ...payload })}\n\n`);
       };
+      const heartbeat = setInterval(() => {
+        if (!res.writableEnded) res.write(`: keepalive ${Date.now()}\n\n`);
+      }, streamHeartbeatIntervalMs);
+      heartbeat.unref?.();
       try {
         emit("connected", { timestamp: new Date().toISOString() });
         void logger.info("incident_stream_started", {
@@ -672,6 +693,7 @@ const requestHandler = async (req, res) => {
           error: streamError?.message || "Unexpected stream error"
         });
       } finally {
+        clearInterval(heartbeat);
         res.end();
       }
       return;
@@ -742,8 +764,15 @@ if (!isVercel) {
     }).catch(() => {});
     console.log(`Trinetra running at http://${host}:${port}`);
     startSyntheticMonitor();
+    const pruneInterval = setInterval(pruneAnalyzeRateLimitBuckets, Math.max(30_000, analyzeRateLimitWindowMs));
+    pruneInterval.unref?.();
   });
 } else {
+  void logger.warn("server_started_ephemeral_state", {
+    host: "vercel",
+    runtime: "vercel",
+    warning: "Vercel invocations do not share memory. signedApprovals, pendingApprovalTimeouts, dedupeCache and demo storefront state will not persist across requests, so the human approval loop and demo storefront mutation will not work in this runtime."
+  }).catch(() => {});
   void logger.info("server_started", {
     host: "vercel",
     port: null,
@@ -845,7 +874,7 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
       requestId: approvalRequestId,
       actionId
     };
-    signedApprovals.set(approvalKey(incidentKey, approvalRequestId), rejected);
+    rememberSignedApproval(approvalKey(incidentKey, approvalRequestId), rejected);
     clearPendingApprovalTimeout(incidentKey, "rejected");
     void logger.warn("slack_approval_rejected", rejected).catch(() => {});
     return rejected;
@@ -859,7 +888,7 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
     requestId: approvalRequestId,
     actionId
   };
-  signedApprovals.set(approvalKey(incidentKey, approvalRequestId), approval);
+  rememberSignedApproval(approvalKey(incidentKey, approvalRequestId), approval);
   clearPendingApprovalTimeout(incidentKey);
   void logger.info("slack_approval_recorded", approval).catch(() => {});
   return approval;
@@ -916,6 +945,46 @@ function approvalKey(incidentKey, requestId) {
   return `${incidentKey}:${requestId || "unknown"}`;
 }
 
+function rememberSignedApproval(key, approval) {
+  signedApprovals.delete(key);
+  signedApprovals.set(key, approval);
+  while (signedApprovals.size > signedApprovalsMax) {
+    const oldestKey = signedApprovals.keys().next().value;
+    if (oldestKey === undefined) break;
+    signedApprovals.delete(oldestKey);
+  }
+}
+
+function clientIpFromRequest(req) {
+  const forwarded = req.headers?.["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.length) {
+    return forwarded.split(",")[0].trim();
+  }
+  return req.socket?.remoteAddress || "unknown";
+}
+
+function checkAnalyzeRateLimit(req) {
+  const ip = clientIpFromRequest(req);
+  const now = Date.now();
+  const bucket = analyzeRateLimitBuckets.get(ip);
+  if (!bucket || bucket.resetAt <= now) {
+    analyzeRateLimitBuckets.set(ip, { count: 1, resetAt: now + analyzeRateLimitWindowMs });
+    return { allowed: true, remaining: analyzeRateLimitMax - 1, retryAfterMs: 0 };
+  }
+  if (bucket.count >= analyzeRateLimitMax) {
+    return { allowed: false, remaining: 0, retryAfterMs: bucket.resetAt - now };
+  }
+  bucket.count += 1;
+  return { allowed: true, remaining: analyzeRateLimitMax - bucket.count, retryAfterMs: 0 };
+}
+
+function pruneAnalyzeRateLimitBuckets() {
+  const now = Date.now();
+  for (const [ip, bucket] of analyzeRateLimitBuckets) {
+    if (bucket.resetAt <= now) analyzeRateLimitBuckets.delete(ip);
+  }
+}
+
 function resolveSignedApproval(incidentKey, requestId) {
   if (!requestId) return { approval: "pending", approverId: null, source: "none" };
   const approval = signedApprovals.get(approvalKey(incidentKey, requestId));
@@ -950,7 +1019,7 @@ function recordLocalConsoleApproval(body, requestId) {
     requestId: approvalRequestId,
     actionId: "approve_remediation"
   };
-  signedApprovals.set(approvalKey(incidentKey, approvalRequestId), approval);
+  rememberSignedApproval(approvalKey(incidentKey, approvalRequestId), approval);
   clearPendingApprovalTimeout(incidentKey);
   void logger.info("local_console_approval_recorded", {
     ...approval,
@@ -1288,7 +1357,7 @@ async function pollSlackApprovalReaction({ incidentKey, channel, ts, requestId }
       channel,
       ts
     };
-    signedApprovals.set(approvalKey(incidentKey, requestId), approval);
+    rememberSignedApproval(approvalKey(incidentKey, requestId), approval);
     clearPendingApprovalTimeout(incidentKey);
     void logger.info("slack_reaction_approval_recorded", approval).catch(() => {});
     return;
@@ -1306,7 +1375,7 @@ async function pollSlackApprovalReaction({ incidentKey, channel, ts, requestId }
       channel,
       ts
     };
-    signedApprovals.set(approvalKey(incidentKey, requestId), rejected);
+    rememberSignedApproval(approvalKey(incidentKey, requestId), rejected);
     clearPendingApprovalTimeout(incidentKey, "rejected");
     void logger.warn("slack_reaction_escalation_recorded", rejected).catch(() => {});
   }
