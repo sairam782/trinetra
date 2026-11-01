@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { request, startServer, slackApprovalBody, slackSignatureHeaders } from "./helpers/server-runner.mjs";
 
 const token = "test-operator-credential-with-at-least-32-characters";
@@ -65,10 +67,16 @@ describe("Production HTTP boundary", () => {
   });
 
   it("reports unavailable storage instead of claiming readiness", async (t) => {
-    const server = await startServer();
-    t.after(async () => { await server.kill(); await rm(`${server.dataDir}-backup`, { recursive: true, force: true }); });
-    await rename(server.dataDir, `${server.dataDir}-backup`);
-    await writeFile(server.dataDir, "not a directory");
+    const fixture = await mkdtemp(join(tmpdir(), "trinetra-unavailable-"));
+    await mkdir(join(fixture, "storage"));
+    const dataPath = join(fixture, "data");
+    await symlink(join(fixture, "storage"), dataPath);
+    const server = await startServer({ DATA_DIR: dataPath });
+    t.after(async () => { await server.kill(); await rm(fixture, { recursive: true, force: true }); });
+    await writeFile(join(fixture, "unavailable"), "not a directory");
+    // Atomically replace the symlink, so background logging cannot recreate a
+    // directory between the two operations used by the previous fixture.
+    await rename(join(fixture, "unavailable"), dataPath);
     const readiness = await request(server.port, "/api/readiness");
     assert.equal(readiness.status, 503);
     assert.equal(readiness.json().checks.auditPersistence, false);
