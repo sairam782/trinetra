@@ -4,7 +4,7 @@ export function validateRuntimeConfig(env = process.env) {
   const production = env.NODE_ENV === "production";
   const errors = [];
   const bounds = {
-    PORT: [1, 65535], MAX_BODY_BYTES: [1024, 1048576],
+    PORT: [0, 65535], MAX_BODY_BYTES: [1024, 1048576],
     VERIFICATION_TIMEOUT_MS: [100, 3600000], DEDUPE_WINDOW_MS: [1000, 3600000],
     SYNTHETIC_CHECK_INTERVAL_MS: [1000, 3600000],
     ANALYZE_RATE_LIMIT_WINDOW_MS: [1000, 3600000], ANALYZE_RATE_LIMIT_MAX: [1, 1000],

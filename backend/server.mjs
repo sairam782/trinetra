@@ -785,14 +785,16 @@ if (!Object.values(await readinessChecks()).every(Boolean)) throw new Error("Sta
 
 if (!isVercel) {
   server.listen(port, host, () => {
+    const boundPort = server.address().port;
     void logger.info("server_started", {
       host,
-      port,
+      port: boundPort,
       mode: deploymentMode,
       qwenLive: qwenConfig.liveEnabled,
       remediationExecutionMode
     }).catch(() => {});
-    console.log(`Trinetra running at http://${host}:${port}`);
+    console.log(`Trinetra running at http://${host}:${boundPort}`);
+    if (process.connected) process.send({ type: "ready", port: boundPort });
     startSyntheticMonitor();
     const pruneInterval = setInterval(pruneAnalyzeRateLimitBuckets, Math.max(30_000, analyzeRateLimitWindowMs));
     pruneInterval.unref?.();
@@ -2166,7 +2168,7 @@ function syntheticMonitorStatus() {
 function syntheticTargetUrl() {
   if (syntheticMonitor.targetUrl) return syntheticMonitor.targetUrl;
   const connectHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  return `http://${connectHost}:${port}/demo-store`;
+  return `http://${connectHost}:${server.address()?.port || port}/demo-store`;
 }
 
 function startSyntheticMonitor() {
