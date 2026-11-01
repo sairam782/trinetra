@@ -6,6 +6,7 @@ const envPath = ".env";
 const examplePath = ".env.example";
 
 const secretKeys = new Set([
+  "TRINETRA_AUTH_TOKEN",
   "QWEN_API_KEY",
   "DASHSCOPE_API_KEY",
   "ALIBABA_CLOUD_ACCESS_KEY_ID",
@@ -35,7 +36,7 @@ const recommended = {
   REMEDIATION_EXECUTION_MODE: "dry-run",
   AUTO_EXECUTE_CONFIDENCE_THRESHOLD: "0.90",
   RUNBOOK_ALLOWLIST: "RB-101,RB-204,RB-330,RB-401,RB-510,RB-777",
-  SLACK_APPROVER_IDS: "U-HACK-JUDGE,U-ONCALL-PRIMARY",
+  SLACK_APPROVER_IDS: "",
   SLACK_APPROVAL_CHANNEL_ID: "",
   PUBLIC_BASE_URL: "",
   MCP_ALERTS_LIVE: "false",

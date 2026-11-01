@@ -1,16 +1,15 @@
-import { existsSync, readFileSync } from "node:fs";
-
-const env = {
-  ...parseEnv(existsSync(".env.example") ? readFileSync(".env.example", "utf8") : ""),
-  ...parseEnv(existsSync(".env") ? readFileSync(".env", "utf8") : ""),
-  ...process.env
-};
+import { loadEnvFile } from "../backend/config/env-loader.mjs";
+import { validateRuntimeConfig } from "../backend/config/runtime.mjs";
+loadEnvFile();
+const env = process.env;
+try { validateRuntimeConfig(env); }
+catch (error) { console.error(error.message); process.exitCode = 1; }
 
 const checks = [
   ["Qwen fallback mode", env.QWEN_LIVE_CALLS !== "true" || Boolean(env.QWEN_API_KEY || env.DASHSCOPE_API_KEY), "Set QWEN_API_KEY/DASHSCOPE_API_KEY or keep QWEN_LIVE_CALLS=false"],
-  ["Remediation safety", env.REMEDIATION_EXECUTION_MODE === "dry-run" || env.REMEDIATION_EXECUTION_MODE === "execute", "Set REMEDIATION_EXECUTION_MODE=dry-run or execute"],
-  ["Slack approvers", Boolean(env.SLACK_APPROVER_IDS), "Set SLACK_APPROVER_IDS for gated writes"],
-  ["Alibaba region", Boolean(env.ALIBABA_CLOUD_REGION), "Set ALIBABA_CLOUD_REGION"],
+  ["Remediation safety", !env.REMEDIATION_EXECUTION_MODE || env.REMEDIATION_EXECUTION_MODE === "dry-run" || env.REMEDIATION_EXECUTION_MODE === "execute", "Set REMEDIATION_EXECUTION_MODE=dry-run or execute"],
+  ["Slack approvers", env.MCP_CHAT_LIVE !== "true" || Boolean(env.SLACK_APPROVER_IDS), "Set SLACK_APPROVER_IDS for gated writes"],
+  ["Alibaba region", !env.ALIBABA_CLOUD_ACCESS_KEY_ID || Boolean(env.ALIBABA_CLOUD_REGION), "Set ALIBABA_CLOUD_REGION"],
   ["GitHub MCP", env.MCP_GITHUB_LIVE !== "true" || Boolean(env.GITHUB_TOKEN), "Set GITHUB_TOKEN or keep MCP_GITHUB_LIVE=false"],
   ["Slack MCP", env.MCP_CHAT_LIVE !== "true" || Boolean(env.SLACK_BOT_TOKEN), "Set SLACK_BOT_TOKEN or keep MCP_CHAT_LIVE=false"],
   ["Slack approval channel", env.MCP_CHAT_LIVE !== "true" || Boolean(env.SLACK_APPROVAL_CHANNEL_ID || env.SLACK_CHANNEL_ID), "Set SLACK_APPROVAL_CHANNEL_ID to the channel where approval requests should be posted"],
@@ -39,17 +38,6 @@ console.log(`- Remediation: ${env.REMEDIATION_EXECUTION_MODE || "dry-run"}`);
 console.log(`- Live MCPs: ${liveMcps(env).join(", ") || "none"}`);
 
 if (failures) process.exitCode = 1;
-
-function parseEnv(raw) {
-  const result = {};
-  for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
-    const index = trimmed.indexOf("=");
-    result[trimmed.slice(0, index)] = trimmed.slice(index + 1);
-  }
-  return result;
-}
 
 function liveMcps(values) {
   return Object.entries(values)

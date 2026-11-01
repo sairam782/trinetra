@@ -1,0 +1,45 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run ci
+      - run: npm audit --omit=dev
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: docker build -t trinetra:test .
+      - name: Verify non-root container and readiness
+        run: |
+          test "$(docker inspect --format='{{.Config.User}}' trinetra:test)" = node
+          docker run -d --name trinetra -e TRINETRA_AUTH_TOKEN=ci-only-token-with-at-least-32-characters -e PUBLIC_BASE_URL=https://trinetra.example trinetra:test
+          for attempt in $(seq 1 30); do
+            state=$(docker inspect --format='{{.State.Health.Status}}' trinetra)
+            if [ "$state" = healthy ]; then exit 0; fi
+            if [ "$state" = unhealthy ]; then break; fi
+            sleep 2
+          done
+          docker logs trinetra
+          exit 1
+      - if: always()
+        run: docker rm -f trinetra || true

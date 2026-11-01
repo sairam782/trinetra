@@ -1,3 +1,4 @@
+let runtimeCapabilities = { localApproval: false, demoControls: false };
 const els = {
   demoModeButton: document.querySelector("#demoModeButton"),
   realtimeModeButton: document.querySelector("#realtimeModeButton"),
@@ -132,6 +133,7 @@ els.agentGraph.addEventListener("click", (event) => {
   if (node) inspectGraphNode(node.dataset.node);
 });
 
+refreshCapabilities();
 loadFailureOptions();
 if (initialIncidentKey && [...els.incidentSelect.options].some((option) => option.value === initialIncidentKey)) {
   els.incidentSelect.value = initialIncidentKey;
@@ -813,6 +815,9 @@ async function loadFailureOptions() {
 }
 
 async function injectDemoError() {
+  if (!runtimeCapabilities.demoControls) return;
+  els.injectErrorButton.disabled = true;
+  try {
   await fetchJson("/api/demo-site/inject-error", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -823,6 +828,9 @@ async function injectDemoError() {
   renderLocalApprovalCard(null);
   await refreshDemoSiteStatus();
   await refreshLogs();
+  } catch (error) {
+    els.demoSiteText.textContent = error.message || "Unable to inject failure";
+  } finally { els.injectErrorButton.disabled = !runtimeCapabilities.demoControls; }
 }
 
 async function solveWebsiteIncident() {
@@ -934,7 +942,7 @@ async function refreshApprovals() {
 }
 
 async function approveLocalRemediation() {
-  if (!isPipelineWaitingForApproval(lastRunData)) return;
+  if (!runtimeCapabilities.localApproval || !isPipelineWaitingForApproval(lastRunData)) return;
   const incidentKey = lastRunData?.incidentKey || els.incidentSelect.value;
   const requestId = lastRunData?.requestId || null;
   if (!incidentKey || !requestId) return;
@@ -978,14 +986,17 @@ function isPipelineWaitingForApproval(data) {
 function renderLocalApprovalCard(data = lastRunData, statusText = "") {
   const waiting = isPipelineWaitingForApproval(data);
   els.localApprovalCard.classList.toggle("hidden", !waiting && !statusText);
-  els.approveLocalButton.disabled = !waiting || pipelineRunning;
+  els.approveLocalButton.disabled = !runtimeCapabilities.localApproval || !waiting || pipelineRunning;
+  els.approveLocalButton.classList.toggle("hidden", !runtimeCapabilities.localApproval);
   if (!waiting && !statusText) return;
   const incident = data?.incident;
   els.localApprovalTitle.textContent = waiting
     ? `${incident?.id || "Incident"} is waiting for approval`
     : "Approval recorded";
   els.localApprovalText.textContent = waiting
-    ? `${incident?.service || "Service"} requires a human gate before remediation. Use this local approval when a reviewer cannot access the configured Slack workspace.`
+    ? (runtimeCapabilities.localApproval
+      ? `${incident?.service || "Service"} requires a human gate before remediation. Use this local approval for a demo review.`
+      : `${incident?.service || "Service"} requires an authorized Slack reviewer. This console resumes after approval.`)
     : "The approval was recorded locally for this demo run.";
   els.localApprovalStatus.textContent = statusText || `Request ${valueOrNA(data?.requestId)}`;
 }
@@ -1113,8 +1124,11 @@ function renderApiStatusRows({ health, readiness, healthError, readinessError } 
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await window.fetch(url, options);
-  if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
+  const response = await window.fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(15000) });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({}));
+    throw new Error(detail.error || `${url} failed: ${response.status}`);
+  }
   return response.json();
 }
 
@@ -1526,7 +1540,7 @@ function renderMetricDelta(before, after = {}) {
     const chip = document.createElement("div");
     const improved = after[key] !== undefined && after[key] < before[key];
     chip.className = improved ? "delta good" : "delta";
-    chip.innerHTML = `<span>${labelFor(key)}</span><strong>${before[key]} → ${after[key] ?? before[key]}</strong>`;
+    chip.innerHTML = `<span>${escapeHtml(labelFor(key))}</span><strong>${escapeHtml(String(before[key]))} → ${escapeHtml(String(after[key] ?? before[key]))}</strong>`;
     return chip;
   }));
 }
@@ -1594,7 +1608,7 @@ function setLoading(isLoading) {
   document.body.classList.toggle("pipeline-running", isLoading);
   els.runButton.disabled = isLoading;
   els.solveWebsiteButton.disabled = isLoading;
-  els.approveLocalButton.disabled = isLoading || !isPipelineWaitingForApproval(lastRunData);
+  els.approveLocalButton.disabled = !runtimeCapabilities.localApproval || isLoading || !isPipelineWaitingForApproval(lastRunData);
   if (isLoading) {
     els.runButton.textContent = currentMode === "realtime" ? "Probing..." : "Running...";
     els.solveWebsiteButton.textContent = "Running...";
@@ -1654,4 +1668,15 @@ function syntaxHighlightJson(value) {
     if (keyword) return `<span class="json-keyword">${keyword}</span>`;
     return `<span class="json-number">${match}</span>`;
   });
+}
+
+async function refreshCapabilities() {
+  els.injectErrorButton.disabled = true;
+  els.approveLocalButton.disabled = true;
+  try { runtimeCapabilities = await fetchJson("/api/capabilities"); }
+  catch { runtimeCapabilities = { localApproval: false, demoControls: false }; }
+  els.injectErrorButton.disabled = !runtimeCapabilities.demoControls;
+  els.failureSelect.disabled = !runtimeCapabilities.demoControls;
+  els.injectErrorButton.title = runtimeCapabilities.demoControls ? "Inject a test storefront failure" : "Demo controls are disabled on this deployment";
+  renderLocalApprovalCard();
 }

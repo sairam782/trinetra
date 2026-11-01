@@ -1,5 +1,4 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { appendJsonLine, readRecentJsonLines } from "./storage.mjs";
 
 const secretKeyPattern = /(api[_-]?key|token|secret|password|authorization|cookie|credential)/i;
 
@@ -12,9 +11,10 @@ export function createLogger({ path, service = "trinetra-backend", consoleEnable
       event,
       ...redact(fields)
     };
-    const line = `${JSON.stringify(entry)}\n`;
-    await mkdir(dirname(path), { recursive: true });
-    await appendFile(path, line, "utf8");
+    await appendJsonLine(path, entry).catch((error) => {
+      console.error("Trinetra log persistence failed", error.code || error.name);
+      throw error;
+    });
     if (consoleEnabled) {
       const message = `${entry.ts} ${level.toUpperCase()} ${event}`;
       if (level === "error") console.error(message, entry);
@@ -32,22 +32,16 @@ export function createLogger({ path, service = "trinetra-backend", consoleEnable
 }
 
 export async function readRecentLogEntries(path, limit = 100) {
-  try {
-    const raw = await readFile(path, "utf8");
-    return raw
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .slice(-limit)
-      .reverse()
-      .map((line) => JSON.parse(line));
-  } catch (error) {
-    if (error?.code === "ENOENT") return [];
-    throw error;
-  }
+  return readRecentJsonLines(path, limit);
 }
 
 export function redact(value) {
+  if (typeof value === "string") {
+    for (const [key, secret] of Object.entries(process.env)) {
+      if (secretKeyPattern.test(key) && secret.length >= 8) value = value.split(secret).join("[redacted]");
+    }
+    return value.replace(/(Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/gi, "$1 [redacted]");
+  }
   if (Array.isArray(value)) return value.map((item) => redact(item));
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [

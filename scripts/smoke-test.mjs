@@ -1,24 +1,10 @@
 import http from "node:http";
-import { spawn } from "node:child_process";
 import crypto from "node:crypto";
+import { startServer } from "../test/helpers/server-runner.mjs";
 
-const port = 4197;
 const slackSigningSecret = "test-signing-secret";
-const child = spawn(process.execPath, ["backend/server.mjs"], {
-  env: {
-    ...process.env,
-    PORT: String(port),
-    HOST: "127.0.0.1",
-    NODE_ENV: "test",
-    QWEN_LIVE_CALLS: "false",
-    REMEDIATION_EXECUTION_MODE: "dry-run",
-    SLACK_SIGNING_SECRET: slackSigningSecret,
-    SLACK_APPROVER_IDS: "U-HACK-JUDGE",
-    SYNTHETIC_CHECK_INTERVAL_MS: "1000",
-    RUNBOOK_ALLOWLIST: "RB-101,RB-204,RB-330,RB-401,RB-510,RB-777"
-  },
-  stdio: ["ignore", "pipe", "pipe"]
-});
+const server = await startServer({ SLACK_APPROVER_IDS: "U-HACK-JUDGE" });
+const port = server.port;
 
 try {
   await waitForServer(port);
@@ -34,7 +20,9 @@ try {
     body: JSON.stringify({ failureId: "apiTimeout" })
   });
   const brokenSite = await requestText("/demo-store", { expectedStatus: 504 });
-  const approvalRequestId = "smoke-website-approval";
+  const pending = await requestJson("/api/incidents/analyze", { method: "POST", body: JSON.stringify({ incidentKey: "website" }) });
+  assert(pending.gate.kind === "human", "website must wait for approval");
+  const approvalRequestId = pending.requestId;
   await approveIncident("website", approvalRequestId);
   const websiteAnalysis = await requestJson("/api/incidents/analyze", {
     method: "POST",
@@ -73,7 +61,7 @@ try {
   assert(runs.length >= 1, "analysis should persist a run");
   console.log("smoke test passed");
 } finally {
-  child.kill("SIGTERM");
+  await server.kill();
 }
 
 async function approveIncident(incidentKey, requestId) {
