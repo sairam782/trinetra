@@ -4,20 +4,20 @@ const defaultRetryCount = 1;
 const defaultStreamIdleTimeoutMs = 15000;
 const defaultMaxOutputTokens = 1024;
 
-function parseFiniteNumber(value, fallback) {
+function boundedInteger(value, fallback, min, max) {
   if (value === undefined || value === null || value === "") return fallback;
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
 }
 
 export function qwenRuntimeConfig(env = process.env) {
   return {
     apiKeyConfigured: Boolean(env.QWEN_API_KEY || env.DASHSCOPE_API_KEY),
     baseUrl: (env.QWEN_API_BASE_URL || defaultBaseUrl).replace(/\/$/, ""),
-    timeoutMs: parseFiniteNumber(env.QWEN_AGENT_TIMEOUT_MS, defaultTimeoutMs),
-    retryCount: Math.max(0, parseFiniteNumber(env.QWEN_AGENT_RETRY_COUNT, defaultRetryCount)),
-    streamIdleTimeoutMs: parseFiniteNumber(env.QWEN_STREAM_IDLE_TIMEOUT_MS, defaultStreamIdleTimeoutMs),
-    maxOutputTokens: parseFiniteNumber(env.QWEN_MAX_OUTPUT_TOKENS, defaultMaxOutputTokens),
+    timeoutMs: boundedInteger(env.QWEN_AGENT_TIMEOUT_MS, defaultTimeoutMs, 100, 120000),
+    retryCount: boundedInteger(env.QWEN_AGENT_RETRY_COUNT, defaultRetryCount, 0, 3),
+    streamIdleTimeoutMs: boundedInteger(env.QWEN_STREAM_IDLE_TIMEOUT_MS, defaultStreamIdleTimeoutMs, 100, 120000),
+    maxOutputTokens: boundedInteger(env.QWEN_MAX_OUTPUT_TOKENS, defaultMaxOutputTokens, 1, 16384),
     liveEnabled: env.QWEN_LIVE_CALLS === "true"
   };
 }
@@ -85,8 +85,8 @@ export async function qwenChatJson({ role, model, system, prompt, fallback, env 
       }, config.timeoutMs);
 
       if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Qwen ${response.status}: ${text.slice(0, 500)}`);
+        await response.body?.cancel();
+        throw new Error(`Qwen provider returned HTTP ${response.status}`);
       }
 
       if (streamingRequested) {
@@ -104,9 +104,9 @@ export async function qwenChatJson({ role, model, system, prompt, fallback, env 
         });
       }
 
-      const payload = await response.json();
+      const payload = JSON.parse(await readBoundedBody(response));
       const content = payload?.choices?.[0]?.message?.content;
-      const parsed = parseJsonObject(content);
+      const parsed = validateModelOutput(parseJsonObject(content), fallback);
       const finishReason = payload?.choices?.[0]?.finish_reason || null;
       const usage = payload.usage || null;
       return {
@@ -160,6 +160,7 @@ export async function qwenChatJson({ role, model, system, prompt, fallback, env 
 async function readStreamingJsonResponse({ response, role, model, system, prompt, fallback, startedAt, startedMs, onToken, idleTimeoutMs }) {
   const decoder = new TextDecoder();
   let buffer = "";
+  let receivedBytes = 0;
   let content = "";
   let usage = null;
   let finishReason = null;
@@ -181,6 +182,8 @@ async function readStreamingJsonResponse({ response, role, model, system, prompt
       const { done, value } = await reader.read();
       if (done) break;
       resetIdleTimer();
+      receivedBytes += value.byteLength;
+      if (receivedBytes > 1024 * 1024) throw new Error("Qwen response exceeds 1 MiB");
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || "";
@@ -211,13 +214,15 @@ async function readStreamingJsonResponse({ response, role, model, system, prompt
     }
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 
   if (idleAborted) {
     throw new Error(`Qwen streaming response idle for ${idleTimeoutMs}ms`);
   }
 
-  const parsed = parseJsonObject(content);
+  const parsed = validateModelOutput(parseJsonObject(content), fallback);
   return {
     ...fallback,
     ...parsed,
@@ -243,21 +248,43 @@ async function readStreamingJsonResponse({ response, role, model, system, prompt
 }
 
 async function postWithTimeout(url, options, timeoutMs) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(timeout);
+  // The abort signal stays alive until the response body has been consumed.
+  return fetch(url, { ...options, redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
+}
+
+async function readBoundedBody(response) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response.body) {
+    size += chunk.byteLength;
+    if (size > 1024 * 1024) throw new Error("Qwen response exceeds 1 MiB");
+    chunks.push(chunk);
   }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function validateModelOutput(parsed, fallback) {
+  // Only model-owned fields with the expected top-level shape may override policy output.
+  const output = {};
+  for (const [key, expected] of Object.entries(fallback)) {
+    if (["mcp", "agent", "cost"].includes(key)) continue;
+    const value = parsed[key];
+    if (value === undefined) continue;
+    if (expected !== null && (typeof value !== typeof expected || Array.isArray(value) !== Array.isArray(expected) || value === null)) throw new Error(`Invalid Qwen field: ${key}`);
+    if (typeof value === "number" && (!Number.isFinite(value) || (key === "confidence" && (value < 0 || value > 1)))) throw new Error(`Invalid Qwen field: ${key}`);
+    output[key] = value;
+  }
+  if (!Object.keys(output).length) throw new Error("Qwen response contains no recognized fields");
+  return output;
 }
 
 export function parseJsonObject(content) {
-  if (!content || typeof content !== "string") return {};
-  try {
-    return JSON.parse(content);
-  } catch {
-    // Fall through to bracket scan
+  if (!content || typeof content !== "string") throw new Error("Qwen response is empty");
+  let direct;
+  try { direct = JSON.parse(content); } catch { /* Try a fenced JSON object below. */ }
+  if (direct !== undefined) {
+    if (!direct || typeof direct !== "object" || Array.isArray(direct)) throw new Error("Qwen response must be a JSON object");
+    return direct;
   }
   const candidates = extractJsonCandidates(content);
   for (const candidate of candidates) {
@@ -268,7 +295,7 @@ export function parseJsonObject(content) {
       // try the next candidate
     }
   }
-  return {};
+  throw new Error("Qwen response must contain a valid JSON object");
 }
 
 function extractJsonCandidates(content) {

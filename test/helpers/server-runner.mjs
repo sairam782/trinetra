@@ -1,16 +1,22 @@
 import { spawn } from "node:child_process";
 import http from "node:http";
 import crypto from "node:crypto";
-import net from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { once } from "node:events";
 
 export const testSigningSecret = "test-signing-secret";
 
 export async function startServer(overrides = {}) {
-  const port = await findFreePort();
+  let port;
+  const dataDir = await mkdtemp(join(tmpdir(), "trinetra-test-"));
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => ["PATH", "HOME", "TMPDIR", "SYSTEMROOT"].includes(key)));
   const child = spawn(process.execPath, ["backend/server.mjs"], {
     env: {
-      ...process.env,
-      PORT: String(port),
+      ...inherited,
+      DATA_DIR: dataDir,
+      PORT: "0",
       HOST: "127.0.0.1",
       NODE_ENV: "test",
       QWEN_LIVE_CALLS: "false",
@@ -22,15 +28,25 @@ export async function startServer(overrides = {}) {
       RUNBOOK_ALLOWLIST: "RB-101,RB-204,RB-330,RB-401,RB-510,RB-777",
       ...overrides
     },
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe", "ipc"]
   });
-  child.stderr.on("data", () => {});
-  child.stdout.on("data", () => {});
-  await waitForHealthy(port);
+  let output = "";
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  const stopped = once(child, "exit");
+  child.on("error", () => {});
+  try {
+    port = await waitForBoundPort(child, () => output);
+    await waitForHealthy(port, child, () => output);
+  }
+  catch (error) { child.kill("SIGKILL"); await stopped.catch(() => {}); await rm(dataDir, { recursive: true, force: true }); throw error; }
   return {
     port,
-    kill() {
+    dataDir,
+    async kill() {
       child.kill("SIGTERM");
+      await stopped;
+      await rm(dataDir, { recursive: true, force: true });
     }
   };
 }
@@ -75,27 +91,39 @@ export function request(port, path, options = {}) {
         });
       });
     });
+    req.setTimeout(15000, () => req.destroy(new Error("Test request timed out")));
     req.on("error", reject);
     if (body) req.write(body);
     req.end();
   });
 }
 
-async function findFreePort() {
+function waitForBoundPort(child, output) {
   return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const port = server.address().port;
-      server.close(() => resolve(port));
-    });
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.off("message", onMessage);
+      child.off("exit", onExit);
+      child.off("error", onError);
+    };
+    const onMessage = (message) => {
+      if (message?.type !== "ready" || !Number.isInteger(message.port)) return;
+      cleanup();
+      resolve(message.port);
+    };
+    const onExit = () => { cleanup(); reject(new Error(`Test server exited: ${output()}`)); };
+    const onError = (error) => { cleanup(); reject(error); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`Test server did not bind: ${output()}`)); }, 5000);
+    child.on("message", onMessage);
+    child.once("exit", onExit);
+    child.once("error", onError);
   });
 }
 
-async function waitForHealthy(port) {
+async function waitForHealthy(port, child, output) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Test server exited: ${output()}`);
     try {
       const res = await request(port, "/api/health");
       if (res.status === 200) return;
@@ -104,5 +132,5 @@ async function waitForHealthy(port) {
     }
     await new Promise((r) => setTimeout(r, 50));
   }
-  throw new Error(`server did not become healthy on port ${port}`);
+  throw new Error(`server did not become healthy on port ${port}: ${output()}`);
 }

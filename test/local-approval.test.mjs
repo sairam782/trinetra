@@ -47,12 +47,7 @@ describe("POST /api/approvals/local", () => {
     });
     assert.equal(primingRes.status, 200);
     const primed = primingRes.json();
-    if (primed.gate.kind !== "human") {
-      // Not a hard failure: this fixture may not exercise the gate path on
-      // every run. Skip the acceptance leg but still exercise the earlier
-      // rejection legs above.
-      return;
-    }
+    assert.equal(primed.gate.kind, "human");
     const requestId = primed.requestId;
     const res = await request(server.port, "/api/approvals/local", {
       method: "POST",

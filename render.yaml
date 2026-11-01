@@ -1,60 +1,42 @@
-# Render Blueprint. Deploys the "final state" from the README's
-# Incubation Path: QWEN_LIVE_CALLS=true and REMEDIATION_EXECUTION_MODE=execute.
-# If you want the shadow-mode / dry-run rollout described in the README, flip
-# QWEN_LIVE_CALLS to "false" and REMEDIATION_EXECUTION_MODE to "dry-run"
-# before promoting the blueprint.
+# Single-instance deployment with persistent storage. Paid resources are provisioned
+# only when this blueprint is explicitly deployed. Start in dry-run mode.
 services:
   - type: web
     name: trinetra
     runtime: node
-    plan: free
-    buildCommand: npm install
+    plan: starter
+    numInstances: 1
+    buildCommand: npm ci --ignore-scripts && npm run check
     startCommand: node backend/server.mjs
-    healthCheckPath: /api/health
+    healthCheckPath: /api/readiness
+    disk:
+      name: trinetra-data
+      mountPath: /var/data/trinetra
+      sizeGB: 1
     envVars:
+      - key: NODE_VERSION
+        value: "24"
       - key: NODE_ENV
         value: production
       - key: HOST
         value: 0.0.0.0
-      - key: MAX_BODY_BYTES
-        value: "64000"
-      - key: QWEN_API_KEY
-        sync: false
-      - key: QWEN_API_BASE_URL
-        value: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-      - key: QWEN_MODEL_DEFAULT
-        value: qwen-plus
-      - key: QWEN_MODEL_REMEDIATION
-        value: qwen-plus
-      - key: QWEN_AGENT_TIMEOUT_MS
-        value: "30000"
-      - key: QWEN_AGENT_RETRY_COUNT
-        value: "1"
-      - key: QWEN_LIVE_CALLS
-        value: "true"
-      - key: REMEDIATION_EXECUTION_MODE
-        value: execute
-      - key: VERIFICATION_TIMEOUT_MS
-        value: "180000"
-      - key: RUNBOOK_ALLOWLIST
-        value: RB-101,RB-204,RB-330,RB-401,RB-510,RB-777
-      - key: SLACK_APPROVER_IDS
-        sync: false
-      - key: MCP_CHAT_LIVE
-        value: "true"
-      - key: SLACK_APPROVAL_CHANNEL_ID
-        sync: false
-      - key: SLACK_INTERACTIVE_BUTTONS
-        value: "true"
-      - key: SLACK_BOT_TOKEN
-        sync: false
-      - key: SLACK_SIGNING_SECRET
-        sync: false
+      - key: DATA_DIR
+        value: /var/data/trinetra
+      - key: TRINETRA_AUTH_TOKEN
+        generateValue: true
       - key: PUBLIC_BASE_URL
         sync: false
-      - key: ALIBABA_CLOUD_REGION
-        value: us-west-1
-      - key: ALIBABA_COMPUTE_TARGET
-        value: Render Web Service with Alibaba/Qwen integration
-      - key: ALIBABA_DATABASE_TARGET
-        value: ephemeral demo storage
+      - key: QWEN_LIVE_CALLS
+        value: "false"
+      - key: QWEN_API_BASE_URL
+        value: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+      - key: REMEDIATION_EXECUTION_MODE
+        value: dry-run
+      - key: ENABLE_LOCAL_APPROVAL
+        value: "false"
+      - key: DEMO_CONTROLS_ENABLED
+        value: "false"
+      - key: MCP_CHAT_LIVE
+        value: "false"
+      - key: VERIFICATION_TIMEOUT_MS
+        value: "180000"

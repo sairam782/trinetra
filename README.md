@@ -6,6 +6,8 @@ Detect. Diagnose. Decide. Recover.
 
 Trinetra is an AI incident-response console for a breakable demo storefront. It ingests an incident, runs Qwen-backed agents over logs, metrics, traces, and memory, selects an approved runbook, waits at a human gate when risk requires it, executes only registered remediation tools, verifies recovery, and persists the full audit trail.
 
+**Deployment scope:** this is a single-process demo with hardened hosting controls. Most MCP actions remain simulated; the bundled storefront is the real remediation target. Read [production operations and remaining requirements](docs/PRODUCTION.md) before hosting it.
+
 The live remediation loop is intentionally constrained. Qwen can reason and select tools, but it cannot edit arbitrary files, run shell commands, or access the filesystem.
 
 ## What It Demonstrates
@@ -21,7 +23,7 @@ The live remediation loop is intentionally constrained. Qwen can reason and sele
 ## Quick Start
 
 ```bash
-npm install
+npm ci --ignore-scripts
 npm run dev
 ```
 
@@ -31,7 +33,7 @@ Open:
 http://127.0.0.1:4173
 ```
 
-The app loads `.env` automatically when present.
+The app loads `.env` automatically when present (tests ignore it). Local defaults enable demo controls. If you copy `.env.example`, its safer defaults disable injection and local approval; explicitly set `DEMO_CONTROLS_ENABLED=true` and `ENABLE_LOCAL_APPROVAL=true` for a local demo. Production forbids local approval.
 
 ## Demo Walkthrough
 
@@ -157,7 +159,7 @@ Payload:
 }
 ```
 
-The endpoint only succeeds when a matching pending gate is active.
+The endpoint only succeeds in development when a matching, unexpired pending gate is active. Production requires allowlisted Slack reviewers. Approvals are bound to incident state and runbook and can be consumed once.
 
 ## Qwen Configuration
 
@@ -200,7 +202,7 @@ Use execute mode to let registered backend tools repair the demo storefront:
 REMEDIATION_EXECUTION_MODE=execute npm run dev
 ```
 
-Production-style demos should use `execute` so judges can see the broken website recover after approval and verification.
+Keep hosted deployments in `dry-run` until configuration and staging checks pass. Production execute mode requires live Slack approval and stops on model fallback; only the bundled demo storefront has implemented mutation tools.
 
 ## Repository Layout
 
@@ -325,41 +327,19 @@ Full setup notes are in [docs/API_KEYS_AND_MCPS.md](docs/API_KEYS_AND_MCPS.md).
 
 ## Render Deployment
 
-This repo includes `render.yaml` for a free Render web service.
+The blueprint provisions one service with persistent storage and starts in dry-run mode. It requires a paid disk-backed service when deployed. No infrastructure is created by cloning or editing the repository.
 
-1. Push the repo to GitHub.
-2. Create a Render Blueprint or Web Service from the repo.
-3. Add secret environment variables in Render.
-4. Set `PUBLIC_BASE_URL` to the Render URL.
-5. If using Slack buttons, set Slack Interactivity to:
-
-```text
-https://your-render-service.onrender.com/api/slack/interactions
-```
-
-**What `render.yaml` deploys.** The blueprint provisions the "final state" from
-the Incubation Path below: `QWEN_LIVE_CALLS=true` and
-`REMEDIATION_EXECUTION_MODE=execute`. If you want the shadow-mode / dry-run
-rollout instead, flip both values in `render.yaml` before promoting the
-blueprint.
-
-More details: [deploy/render/README.md](deploy/render/README.md).
+See [Render deployment](deploy/render/README.md) and [production operations](docs/PRODUCTION.md) for required authentication, HTTPS origin, storage, and rollout settings.
 
 ## Docker
 
-```bash
-docker build -t trinetra .
-docker run --rm -p 4173:4173 trinetra
-```
+The image runs as the non-root `node` user and checks actual readiness. Production requires `TRINETRA_AUTH_TOKEN`, `PUBLIC_BASE_URL`, and persistent `DATA_DIR`; starting an unconfigured container intentionally fails. See the [container instructions](docs/PRODUCTION.md#container) for the complete command.
 
-`.dockerignore` excludes `.env`, `.env.*`, and `test/` so a local `.env` with
-real credentials is never baked into the image. Pass runtime configuration
-via `docker run -e KEY=value` or an `--env-file`.
+`.dockerignore` excludes environment files and local runtime data. Supply secrets at runtime from a secret manager or protected environment file.
 
 ## Vercel note
 
-`vercel.json` wires the whole app to a single serverless function. That
-runtime is **not** recommended for the full flow: `signedApprovals`,
+`vercel.json` describes a legacy serverless deployment. Production startup now rejects that runtime because: `signedApprovals`,
 `pendingApprovalTimeouts`, `dedupeCache`, and the demo storefront config all
 live in module-level state, and Vercel invocations don't share memory. On
 Vercel:
@@ -383,7 +363,7 @@ Recommended rollout order:
 4. Slack or local human approval gate.
 5. Approval-gated write tools.
 6. Execute mode for the demo storefront.
-7. Production persistence and real remediation adapters.
+7. Transactional production job state, individual operator identities, and real remediation adapters (not yet implemented).
 
 ## Safety Boundaries
 
@@ -392,7 +372,9 @@ Recommended rollout order:
 - Qwen cannot call tools outside the registered remediation tool list.
 - Client-sent `approval: "approved"` is ignored.
 - Slack approvals must be signed or reaction-verified.
-- Local browser approvals only work for the currently pending run ID.
+- Local browser approvals are development-only; production requires an allowlisted Slack reviewer.
+- Approvals expire and bind to a specific pending run, incident state and runbook; consumed approvals cannot be reused.
+- Production requires authenticated access and never auto-approves from model confidence alone.
 - Verification is required before resolution.
 
 ## Author

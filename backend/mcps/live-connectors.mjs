@@ -4,8 +4,9 @@ export async function checkLiveMcpHealth(env = process.env) {
     checkJira(env),
     checkPrometheus(env)
   ]);
-  return Object.fromEntries(checks.map((result) => {
-    const value = result.status === "fulfilled" ? result.value : { id: "unknown", status: "error", message: result.reason?.message || "health check failed" };
+  const ids = ["chat", "tickets", "metrics"];
+  return Object.fromEntries(checks.map((result, index) => {
+    const value = result.status === "fulfilled" ? result.value : { id: ids[index], status: "error", message: "Provider health check failed or timed out" };
     return [value.id, value];
   }));
 }
@@ -71,13 +72,7 @@ function parseFiniteNumber(value, fallback) {
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = parseFiniteNumber(process.env.MCP_HEALTH_TIMEOUT_MS, 6000)) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(timeout);
-  }
+  return fetch(url, { ...options, redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
 }
 
 function skipped(id) {

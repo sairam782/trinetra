@@ -1,22 +1,26 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
+import { access, mkdir, open, readFile, realpath, rm } from "node:fs/promises";
+import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnvFile } from "./config/env-loader.mjs";
+import { validateRuntimeConfig } from "./config/runtime.mjs";
+import { authenticated, sameOriginMutation } from "./security.mjs";
+import { appendJsonLine, atomicWriteJson, readRecentJsonLines, serialize, flushWrites } from "./storage.mjs";
 import { getAlibabaDeploymentProof } from "./cloud/alibaba-client.mjs";
 import { qwenChatJson, qwenRuntimeConfig } from "./cloud/qwen-client.mjs";
-import { createLogger, readRecentLogEntries } from "./logger.mjs";
+import { createLogger, readRecentLogEntries, redact } from "./logger.mjs";
 import { checkLiveMcpHealth } from "./mcps/live-connectors.mjs";
 
-loadEnvFile();
+if (process.env.NODE_ENV !== "test") loadEnvFile();
+const runtimePolicy = validateRuntimeConfig();
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = join(__dirname, "..");
 const publicDir = join(repoRoot, "frontend");
 const isVercel = process.env.VERCEL === "1" || process.env.VERCEL === "true";
-const dataDir = isVercel ? join("/tmp", "trinetra-data") : join(repoRoot, "data");
+const dataDir = process.env.DATA_DIR || (isVercel ? join("/tmp", "trinetra-data") : join(repoRoot, "data"));
 const auditLogPath = join(dataDir, "incident-runs.jsonl");
 const backendLogPath = join(dataDir, "backend-events.jsonl");
 const memoryStorePath = join(dataDir, "historical-memory.json");
@@ -32,7 +36,7 @@ const maxBodyBytes = parseFiniteNumber(process.env.MAX_BODY_BYTES, 64_000);
 const deploymentMode = process.env.NODE_ENV === "production" ? "production" : "development";
 const autoExecuteThreshold = parseFiniteNumber(process.env.AUTO_EXECUTE_CONFIDENCE_THRESHOLD, 0.9);
 const approvedRunbookAllowlist = new Set((process.env.RUNBOOK_ALLOWLIST || "RB-101,RB-204,RB-330,RB-401,RB-510,RB-777").split(",").map((item) => item.trim()).filter(Boolean));
-const slackApproverAllowlist = (process.env.SLACK_APPROVER_IDS || "U-HACK-JUDGE,U-ONCALL-PRIMARY").split(",").map((item) => item.trim()).filter(Boolean);
+const slackApproverAllowlist = (process.env.SLACK_APPROVER_IDS || "").split(",").map((item) => item.trim()).filter(Boolean);
 const slackSigningSecret = process.env.SLACK_SIGNING_SECRET || "";
 const slackApprovalChannelId = process.env.SLACK_APPROVAL_CHANNEL_ID || process.env.SLACK_CHANNEL_ID || "";
 const slackInteractiveButtonsEnabled = process.env.SLACK_INTERACTIVE_BUTTONS === "true";
@@ -55,6 +59,9 @@ const dedupeWindowMs = parseFiniteNumber(process.env.DEDUPE_WINDOW_MS, 180_000);
 const verificationTimeoutMs = parseFiniteNumber(process.env.VERIFICATION_TIMEOUT_MS, 30_000);
 const syntheticCheckIntervalMs = parseFiniteNumber(process.env.SYNTHETIC_CHECK_INTERVAL_MS, 10_000);
 const dedupeCache = new Map();
+const activeIncidents = new Set();
+let draining = false;
+let persistenceHealthy = true;
 const signedApprovals = new Map();
 const signedApprovalsMax = Math.max(50, parseFiniteNumber(process.env.SIGNED_APPROVALS_MAX, 500));
 const pendingApprovalTimers = new Map();
@@ -460,7 +467,23 @@ const requestHandler = async (req, res) => {
     }).catch(() => {});
   });
   try {
-    const url = new URL(req.url || "/", `http://${req.headers.host}`);
+    let url;
+    try {
+      url = new URL(req.url || "/", "http://localhost");
+      decodeURIComponent(url.pathname);
+    } catch { throw new HttpError(400, "Invalid request URL"); }
+    if (draining) throw new HttpError(503, "Server is shutting down");
+    const probe = req.method === "GET" && ["/api/health", "/api/readiness", "/demo-store"].includes(url.pathname);
+    const slackCallback = req.method === "POST" && url.pathname === "/api/slack/interactions";
+    if (!probe && !slackCallback && !authenticated(req, process.env.TRINETRA_AUTH_TOKEN)) {
+      res.setHeader("www-authenticate", 'Basic realm="Trinetra", charset="UTF-8"');
+      throw new HttpError(401, "Authentication required");
+    }
+    if (!slackCallback && !sameOriginMutation(req, publicBaseUrl)) throw new HttpError(403, "Cross-origin mutation rejected");
+    if (req.method === "GET" && url.pathname === "/api/capabilities") {
+      sendJson(res, 200, { localApproval: runtimePolicy.localApprovalEnabled, demoControls: runtimePolicy.demoControlsEnabled }, requestId);
+      return;
+    }
 
     if (req.method === "GET" && url.pathname === "/api/health") {
       sendJson(res, 200, {
@@ -475,20 +498,9 @@ const requestHandler = async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/api/readiness") {
-      sendJson(res, 200, {
-        ready: true,
-        checks: {
-          staticAssets: true,
-          incidentCatalog: Object.keys(incidents).length,
-          mcpAdapters: mcpRegistry.length,
-          auditPersistence: true,
-          qwenModelTiering: qwenModels,
-          qwenRuntime: qwenConfig,
-          remediationExecutionMode,
-          alibabaDeploymentProof: true
-        },
-        requestId
-      }, requestId);
+      const checks = await readinessChecks();
+      const ready = Object.values(checks).every(Boolean);
+      sendJson(res, ready ? 200 : 503, { ready, checks, requestId }, requestId);
       return;
     }
 
@@ -544,6 +556,7 @@ const requestHandler = async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/api/approvals/local") {
       const body = await readJson(req);
+      if (!runtimePolicy.localApprovalEnabled) throw new HttpError(403, "Local approval is disabled; use an authorized Slack reviewer");
       const approval = recordLocalConsoleApproval(body, requestId);
       sendJson(res, 200, { approval }, requestId);
       return;
@@ -556,6 +569,10 @@ const requestHandler = async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/api/demo-site/inject-error") {
       const body = await readJson(req);
+      if (!runtimePolicy.demoControlsEnabled) throw new HttpError(403, "Demo controls are disabled");
+      if (activeIncidents.has("website")) throw new HttpError(409, "Website remediation is already running");
+      if (typeof body.failureId !== "string" || !Object.hasOwn(demoFailures, body.failureId)) throw new HttpError(400, "Unknown failureId");
+      clearPendingApprovalTimeout("website", "superseded");
       injectDemoSiteError(body.failureId);
       void logger.info("demo_error_injected", {
         requestId,
@@ -568,6 +585,10 @@ const requestHandler = async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/api/demo-site/fix") {
       const body = await readJson(req);
+      if (!runtimePolicy.demoControlsEnabled) throw new HttpError(403, "Demo controls are disabled");
+      if (activeIncidents.has("website")) throw new HttpError(409, "Website remediation is already running");
+      if (body.action !== undefined && (typeof body.action !== "string" || body.action.length > 200)) throw new HttpError(400, "action must be a string of at most 200 characters");
+      clearPendingApprovalTimeout("website", "superseded");
       fixDemoSite({ action: body.action || "manual demo reset" });
       void logger.info("demo_site_fixed", {
         requestId,
@@ -604,7 +625,8 @@ const requestHandler = async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/api/logs") {
-      const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") || 100)));
+      const limit = Number(url.searchParams.get("limit") || 100);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new HttpError(400, "limit must be an integer between 1 and 500");
       sendJson(res, 200, await readRecentLogEntries(backendLogPath, limit), requestId);
       return;
     }
@@ -622,8 +644,7 @@ const requestHandler = async (req, res) => {
         incidentKey: body.incidentKey,
         approval: body.approval
       }).catch(() => {});
-      const result = await orchestrateIncident(validateAnalyzeRequest(body), requestId);
-      await persistRun(result);
+      const result = await runIncident(validateAnalyzeRequest(body), requestId);
       void logger.info("incident_analyze_completed", {
         requestId,
         runId: result.runId,
@@ -646,7 +667,8 @@ const requestHandler = async (req, res) => {
         sendJson(res, 429, { error: "Too many analyze requests; retry shortly", requestId }, requestId);
         return;
       }
-      const body = await readJson(req);
+      const body = validateAnalyzeRequest(await readJson(req));
+      const release = acquireIncident(body.incidentKey);
       res.writeHead(200, securityHeaders({
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-store",
@@ -654,13 +676,16 @@ const requestHandler = async (req, res) => {
         "x-accel-buffering": "no"
       }, requestId));
       const emit = (event, payload = {}) => {
-        res.write(`event: ${event}\n`);
-        res.write(`data: ${JSON.stringify({ requestId, ...payload })}\n\n`);
+        if (res.destroyed || res.writableEnded) return;
+        // Disconnect slow readers rather than growing an unbounded SSE buffer.
+        if (res.writableLength > 1024 * 1024) { res.destroy(); return; }
+        res.write(`event: ${event}\ndata: ${JSON.stringify({ requestId, ...payload })}\n\n`);
       };
       const heartbeat = setInterval(() => {
         if (!res.writableEnded) res.write(`: keepalive ${Date.now()}\n\n`);
       }, streamHeartbeatIntervalMs);
       heartbeat.unref?.();
+      res.once("close", () => clearInterval(heartbeat));
       try {
         emit("connected", { timestamp: new Date().toISOString() });
         void logger.info("incident_stream_started", {
@@ -668,7 +693,7 @@ const requestHandler = async (req, res) => {
           incidentKey: body.incidentKey,
           approval: body.approval
         }).catch(() => {});
-        const result = await orchestrateIncident(validateAnalyzeRequest(body), requestId, { emit });
+        const result = await orchestrateIncident(body, requestId, { emit });
         await persistRun(result);
         void logger.info("incident_stream_completed", {
           requestId,
@@ -690,9 +715,10 @@ const requestHandler = async (req, res) => {
         }).catch(() => {});
         emit("error", {
           timestamp: new Date().toISOString(),
-          error: streamError?.message || "Unexpected stream error"
+          error: streamError instanceof HttpError ? streamError.message : "Unexpected stream error"
         });
       } finally {
+        release();
         clearInterval(heartbeat);
         res.end();
       }
@@ -714,12 +740,13 @@ const requestHandler = async (req, res) => {
       return;
     }
 
-    const safePath = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, "");
-    const filePath = safePath === "/" || safePath === "\\" ? join(publicDir, "index.html") : join(publicDir, safePath);
-    if (!filePath.startsWith(publicDir)) {
-      sendJson(res, 403, { error: "Forbidden", requestId }, requestId);
-      return;
-    }
+    if (url.pathname.startsWith("/api/")) throw new HttpError(404, "API route not found");
+    const decodedPath = decodeURIComponent(url.pathname);
+    if (decodedPath.includes("\0") || decodedPath.includes("\\")) throw new HttpError(400, "Invalid path");
+    const requestedPath = resolve(publicDir, `.${decodedPath === "/" ? "/index.html" : decodedPath}`);
+    if (!requestedPath.startsWith(`${publicDir}${sep}`)) throw new HttpError(403, "Forbidden");
+    const filePath = await realpath(requestedPath);
+    if (!filePath.startsWith(`${publicDir}${sep}`)) throw new HttpError(403, "Forbidden");
 
     const file = await readFile(filePath);
     res.writeHead(200, securityHeaders({
@@ -737,7 +764,7 @@ const requestHandler = async (req, res) => {
       sendJson(res, error.status, { error: error.message, requestId }, requestId);
       return;
     }
-    if (error?.code === "ENOENT") {
+    if (["ENOENT", "EISDIR", "ENOTDIR"].includes(error?.code)) {
       res.writeHead(404, securityHeaders({ "content-type": "text/plain; charset=utf-8" }, requestId));
       res.end("Not found");
       return;
@@ -751,18 +778,23 @@ const requestHandler = async (req, res) => {
   }
 };
 
-const server = http.createServer(requestHandler);
+const server = http.createServer({ requestTimeout: 30000, headersTimeout: 10000, keepAliveTimeout: 5000, maxHeaderSize: 16384 }, requestHandler);
+server.maxRequestsPerSocket = 1000;
+await mkdir(dataDir, { recursive: true, mode: 0o700 });
+if (!Object.values(await readinessChecks()).every(Boolean)) throw new Error("Startup readiness checks failed: verify static assets and writable DATA_DIR");
 
 if (!isVercel) {
   server.listen(port, host, () => {
+    const boundPort = server.address().port;
     void logger.info("server_started", {
       host,
-      port,
+      port: boundPort,
       mode: deploymentMode,
       qwenLive: qwenConfig.liveEnabled,
       remediationExecutionMode
     }).catch(() => {});
-    console.log(`Trinetra running at http://${host}:${port}`);
+    console.log(`Trinetra running at http://${host}:${boundPort}`);
+    if (process.connected) process.send({ type: "ready", port: boundPort });
     startSyntheticMonitor();
     const pruneInterval = setInterval(pruneAnalyzeRateLimitBuckets, Math.max(30_000, analyzeRateLimitWindowMs));
     pruneInterval.unref?.();
@@ -786,23 +818,35 @@ if (!isVercel) {
 export default requestHandler;
 
 async function readJson(req) {
+  if (String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase() !== "application/json") throw new HttpError(415, "Content-Type must be application/json");
   const raw = await readRawBody(req);
-  try {
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    throw new HttpError(400, "Invalid JSON body");
-  }
+  let body;
+  try { body = JSON.parse(raw); } catch { throw new HttpError(400, "Invalid JSON body"); }
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "JSON body must be an object");
+  return body;
 }
 
-async function readRawBody(req) {
-  let raw = "";
-  let totalBytes = 0;
-  for await (const chunk of req) {
-    totalBytes += chunk.length;
-    if (totalBytes > maxBodyBytes) throw new HttpError(413, "Request body too large");
-    raw += chunk;
-  }
-  return raw;
+function readRawBody(req) {
+  return new Promise((resolveBody, reject) => {
+    const chunks = [];
+    let totalBytes = 0;
+    const cleanup = () => {
+      clearTimeout(timer);
+      req.off("data", onData); req.off("end", onEnd); req.off("error", onError); req.off("aborted", onAbort);
+    };
+    const fail = (error) => { cleanup(); req.resume(); reject(error); };
+    const onData = (chunk) => {
+      totalBytes += chunk.length;
+      if (totalBytes > maxBodyBytes) { fail(new HttpError(413, "Request body too large")); return; }
+      chunks.push(chunk);
+    };
+    const onEnd = () => { cleanup(); resolveBody(Buffer.concat(chunks).toString("utf8")); };
+    const onError = (error) => fail(error);
+    const onAbort = () => fail(new HttpError(400, "Request aborted"));
+    const timer = setTimeout(() => fail(new HttpError(408, "Request body timed out")), 10000);
+    req.on("data", onData); req.once("end", onEnd); req.once("error", onError); req.once("aborted", onAbort);
+    if (Number(req.headers["content-length"]) > maxBodyBytes) fail(new HttpError(413, "Request body too large"));
+  });
 }
 
 function sendJson(res, status, payload, requestId = crypto.randomUUID()) {
@@ -815,6 +859,7 @@ function securityHeaders(headers, requestId, options = {}) {
     || "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'";
   return {
     ...headers,
+    ...(runtimePolicy.production ? { "strict-transport-security": "max-age=31536000" } : {}),
     "x-request-id": requestId,
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
@@ -826,10 +871,12 @@ function securityHeaders(headers, requestId, options = {}) {
 const demoStoreCsp = "default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 function validateAnalyzeRequest(body) {
-  const incidentKey = typeof body.incidentKey === "string" ? body.incidentKey : "latency";
+  if (body.incidentKey !== undefined && typeof body.incidentKey !== "string") throw new HttpError(400, "incidentKey must be a string");
+  if (body.approvalRequestId !== undefined && (typeof body.approvalRequestId !== "string" || body.approvalRequestId.length > 100 || !body.approvalRequestId)) throw new HttpError(400, "Invalid approvalRequestId");
+  const incidentKey = body.incidentKey ?? "latency";
   const requestedApproval = "pending";
   const approvalRequestId = typeof body.approvalRequestId === "string" ? body.approvalRequestId : null;
-  if (!incidents[incidentKey]) throw new HttpError(400, `Unknown incidentKey: ${incidentKey}`);
+  if (!Object.hasOwn(incidents, incidentKey)) throw new HttpError(400, `Unknown incidentKey: ${incidentKey}`);
   return { incidentKey, requestedApproval, approvalRequestId };
 }
 
@@ -845,14 +892,16 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
   if (!safeEqual(expected, signature)) throw new HttpError(401, "Invalid Slack signature");
 
   const payload = parseSlackPayload(rawBody, req.headers["content-type"]);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new HttpError(400, "Invalid Slack payload");
   const action = Array.isArray(payload.actions) ? payload.actions[0] : null;
   const actionValue = parseSlackActionValue(action?.value);
   const incidentKey = actionValue.incidentKey || payload.callback_id || payload.view?.private_metadata || "website";
-  if (!incidents[incidentKey]) throw new HttpError(400, `Unknown incidentKey in Slack payload: ${incidentKey}`);
+  if (!Object.hasOwn(incidents, incidentKey)) throw new HttpError(400, `Unknown incidentKey in Slack payload: ${incidentKey}`);
   const approverId = payload.user?.id || payload.user?.username || "unknown";
   if (!slackApproverAllowlist.includes(approverId)) throw new HttpError(403, `Slack approver is not allowlisted: ${approverId}`);
   const actionId = action?.action_id || null;
-  const approvalRequestId = actionValue.requestId || requestId;
+  const approvalRequestId = actionValue.requestId;
+  if (typeof approvalRequestId !== "string" || !approvalRequestId || approvalRequestId.length > 100) throw new HttpError(400, "Slack action requires requestId");
   if (actionId === "open_trinetra_incident" || actionId === "open_incident") {
     return {
       incidentKey,
@@ -864,7 +913,9 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
       actionId
     };
   }
-  if (actionId && actionId !== "approve_remediation") {
+  if (!["approve_remediation", "escalate_only"].includes(actionId)) throw new HttpError(400, "Unknown Slack approval action");
+  const pending = matchingPendingApproval(incidentKey, approvalRequestId);
+  if (actionId === "escalate_only") {
     const rejected = {
       incidentKey,
       approverId,
@@ -884,6 +935,9 @@ function verifyAndRecordSlackApproval(req, rawBody, requestId) {
     approverId,
     state: "approved",
     source: "slack-signed",
+    expiresAt: pending.expiresAt,
+    fingerprint: pending.fingerprint,
+    runbookId: pending.runbookId,
     approvedAt: new Date().toISOString(),
     requestId: approvalRequestId,
     actionId
@@ -911,7 +965,7 @@ function parseSlackActionValue(value) {
   if (!value) return {};
   try {
     const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? parsed : { incidentKey: String(value) };
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : { incidentKey: String(value) };
   } catch {
     return { incidentKey: String(value) };
   }
@@ -956,10 +1010,6 @@ function rememberSignedApproval(key, approval) {
 }
 
 function clientIpFromRequest(req) {
-  const forwarded = req.headers?.["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.length) {
-    return forwarded.split(",")[0].trim();
-  }
   return req.socket?.remoteAddress || "unknown";
 }
 
@@ -968,6 +1018,10 @@ function checkAnalyzeRateLimit(req) {
   const now = Date.now();
   const bucket = analyzeRateLimitBuckets.get(ip);
   if (!bucket || bucket.resetAt <= now) {
+    if (analyzeRateLimitBuckets.size >= 10000) {
+      pruneAnalyzeRateLimitBuckets();
+      if (analyzeRateLimitBuckets.size >= 10000 && !bucket) return { allowed: false, retryAfterMs: analyzeRateLimitWindowMs };
+    }
     analyzeRateLimitBuckets.set(ip, { count: 1, resetAt: now + analyzeRateLimitWindowMs });
     return { allowed: true, remaining: analyzeRateLimitMax - 1, retryAfterMs: 0 };
   }
@@ -985,34 +1039,45 @@ function pruneAnalyzeRateLimitBuckets() {
   }
 }
 
+function incidentFingerprint(incidentKey) {
+  return crypto.createHash("sha256").update(JSON.stringify(incidentKey === "website" ? activeDemoConfig : incidents[incidentKey])).digest("hex");
+}
+
+function matchingPendingApproval(incidentKey, requestId) {
+  const pending = pendingApprovalTimeouts.get(incidentKey);
+  if (!pending || pending.requestId !== requestId || pending.state !== "pending" || Date.parse(pending.expiresAt) <= Date.now() || pending.fingerprint !== incidentFingerprint(incidentKey)) {
+    throw new HttpError(409, "No matching pending approval gate is active for this run");
+  }
+  return pending;
+}
+
 function resolveSignedApproval(incidentKey, requestId) {
   if (!requestId) return { approval: "pending", approverId: null, source: "none" };
   const approval = signedApprovals.get(approvalKey(incidentKey, requestId));
-  if (!approval || approval.state !== "approved") {
-    return { approval: "pending", approverId: null, source: "none" };
+  const pending = pendingApprovalTimeouts.get(incidentKey);
+  if (!approval || approval.state !== "approved" || pending?.requestId !== requestId || pending.state !== "approved" || Date.parse(approval.expiresAt) <= Date.now() || approval.fingerprint !== incidentFingerprint(incidentKey)) {
+    throw new HttpError(409, "Approval is missing, expired, superseded, or already consumed");
   }
-  return { approval: "approved", approverId: approval.approverId, source: approval.source, approvedAt: approval.approvedAt };
+  // Reserve once, before the first async model call. Failed runs require a new approval.
+  approval.state = "consumed";
+  approval.consumedAt = new Date().toISOString();
+  return { approval: "approved", approverId: approval.approverId, source: approval.source, approvedAt: approval.approvedAt, runbookId: approval.runbookId };
 }
 
 function recordLocalConsoleApproval(body, requestId) {
   const incidentKey = typeof body.incidentKey === "string" ? body.incidentKey : "";
   const approvalRequestId = typeof body.requestId === "string" ? body.requestId : "";
-  if (!incidents[incidentKey]) throw new HttpError(400, `Unknown incidentKey: ${incidentKey || "missing"}`);
+  if (!Object.hasOwn(incidents, incidentKey)) throw new HttpError(400, `Unknown incidentKey: ${incidentKey || "missing"}`);
   if (!approvalRequestId) throw new HttpError(400, "requestId is required");
 
-  const existingApproval = signedApprovals.get(approvalKey(incidentKey, approvalRequestId));
-  if (existingApproval?.state === "approved") {
-    return existingApproval;
-  }
-
-  const pending = pendingApprovalTimeouts.get(incidentKey);
-  if (!pending || pending.requestId !== approvalRequestId || pending.state !== "pending") {
-    throw new HttpError(409, "No matching pending approval gate is active for this run");
-  }
+  const pending = matchingPendingApproval(incidentKey, approvalRequestId);
 
   const approval = {
     incidentKey,
     approverId: "local-console-reviewer",
+    expiresAt: pending.expiresAt,
+    fingerprint: pending.fingerprint,
+    runbookId: pending.runbookId,
     state: "approved",
     source: "local-console",
     approvedAt: new Date().toISOString(),
@@ -1094,6 +1159,7 @@ async function requestSlackApproval({ incidentKey, incident, commander, triage, 
   try {
     const response = await fetch("https://slack.com/api/chat.postMessage", {
       method: "POST",
+      signal: AbortSignal.timeout(6000),
       headers: {
         "authorization": `Bearer ${process.env.SLACK_BOT_TOKEN}`,
         "content-type": "application/json; charset=utf-8"
@@ -1250,13 +1316,14 @@ function buildConsoleUrl(incidentKey) {
 }
 
 function registerPendingApprovalTimeout(incidentKey, incident, gate, requestId) {
-  clearPendingApprovalTimeout(incidentKey);
+  clearPendingApprovalTimeout(incidentKey, "superseded");
   const expiresAtMs = Date.now() + verificationTimeoutMs;
   const record = {
     incidentKey,
     incidentId: incident.id,
     service: incident.service,
     runbookId: gate.runbook?.id || null,
+    fingerprint: incidentFingerprint(incidentKey),
     requestId,
     state: "pending",
     createdAt: new Date().toISOString(),
@@ -1335,6 +1402,7 @@ async function pollSlackApprovalReaction({ incidentKey, channel, ts, requestId }
   url.searchParams.set("channel", channel);
   url.searchParams.set("timestamp", ts);
   const response = await fetch(url, {
+    signal: AbortSignal.timeout(6000),
     headers: {
       "authorization": `Bearer ${process.env.SLACK_BOT_TOKEN}`
     }
@@ -1343,6 +1411,8 @@ async function pollSlackApprovalReaction({ incidentKey, channel, ts, requestId }
   if (!response.ok || body.ok !== true) {
     throw new Error(body.error || `Slack reactions.get returned ${response.status}`);
   }
+  let pending;
+  try { pending = matchingPendingApproval(incidentKey, requestId); } catch { return; }
   const reactions = Array.isArray(body.message?.reactions) ? body.message.reactions : [];
   const approvedBy = findAllowedReactionUser(reactions, ["white_check_mark", "heavy_check_mark"]);
   if (approvedBy) {
@@ -1351,6 +1421,9 @@ async function pollSlackApprovalReaction({ incidentKey, channel, ts, requestId }
       approverId: approvedBy,
       state: "approved",
       source: "slack-reaction",
+      expiresAt: pending.expiresAt,
+      fingerprint: pending.fingerprint,
+      runbookId: pending.runbookId,
       approvedAt: new Date().toISOString(),
       requestId,
       reaction: "white_check_mark",
@@ -1530,6 +1603,7 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
     mcp: useMcp(mcpTrace, "memory", "semantic_search", `${runbook.id} matched for ${incident.service}`)
   }));
 
+  if (approvalState.runbookId && approvalState.runbookId !== runbook.id) throw new HttpError(409, "Runbook changed after approval; start a new review");
   const gate = chooseGate(commander, runbook, triage, approval, approverId, approvalState.source);
   emitStreamEvent(emit, "gate_decided", "Remediation gate decided", { gate });
   let approvalMcp = null;
@@ -1557,6 +1631,11 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
     mcp: approvalMcp || useMcp(mcpTrace, gate.kind === "auto" || gate.kind === "approved" ? "deploy" : "chat", gate.kind === "auto" || gate.kind === "approved" ? gate.deployAction : "request_approval", gate.action)
   }));
 
+  if (["auto", "approved"].includes(gate.kind)) {
+    try {
+      await appendJsonLine(auditLogPath, { event: "remediation_authorized", requestId, incidentKey, gate: gate.kind, runbookId: runbook.id, approvalRequestId, approverId, timestamp: new Date().toISOString() });
+    } catch { persistenceHealthy = false; throw new HttpError(503, "Audit persistence failed; remediation was not started"); }
+  }
   const remediationPlan = await runRemediationAgent(incident, triage, gate, specialists, { emit });
   emitAuditEntry(emit, logCall(audit, "AI remediation agent", {
     input: `${gate.label}; ${triage.runbook.id}`,
@@ -1631,7 +1710,7 @@ async function orchestrateIncident({ incidentKey = "latency", requestedApproval 
   return {
     incident,
     incidentKey,
-    runId: `RUN-${requestId.slice(0, 8)}`,
+    runId: `RUN-${requestId}`,
     requestId,
     startedAt: runStartedAt,
     mode: deploymentMode,
@@ -1866,6 +1945,7 @@ async function runQwenAgent(role, input, buildOutput, options = {}) {
       });
     } : null
   });
+  if (runtimePolicy.production && remediationExecutionMode === "execute" && output.provider !== "qwen-live") throw new HttpError(502, "Live model unavailable; remediation stopped for review");
   const stableOutput = {
     ...output,
     agent: fallback.agent || output.agent
@@ -1934,14 +2014,15 @@ function useMcp(trace, id, action, result) {
     id,
     name: connector?.name || id,
     action,
-    status: liveRequested ? "live-requested" : "simulated",
+    status: "simulated",
     request: `${action}()`,
     response: result,
     result,
     latencyMs: null,
     timestamp: new Date().toISOString(),
-    simulation: !liveRequested,
-    note: liveRequested ? "Live connector requested" : "Simulation: no live connector configured; returned replay dataset"
+    simulation: true,
+    liveRequested,
+    note: "Simulation: this action adapter is not implemented; no external action was performed"
   };
   trace.push(call);
   return call;
@@ -1951,9 +2032,11 @@ function readMemorySnapshot() {
   if (!existsSync(memoryStorePath)) return [];
   try {
     const parsed = JSON.parse(readFileSync(memoryStorePath, "utf8"));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+    if (!Array.isArray(parsed)) throw new Error("Historical memory must be an array");
+    return parsed;
+  } catch (error) {
+    persistenceHealthy = false;
+    throw error;
   }
 }
 
@@ -1998,31 +2081,51 @@ async function persistRun(result) {
       mcp: mcp ? { id: mcp.id, action: mcp.action, status: mcp.status } : null
     }))
   };
-  await appendFile(auditLogPath, `${JSON.stringify(record)}\n`, "utf8");
-  await appendMemory(result.memoryUpdate);
-}
-
-async function appendMemory(update) {
-  await mkdir(dataDir, { recursive: true });
-  const current = readMemorySnapshot();
-  current.push(update);
-  await writeFile(memoryStorePath, JSON.stringify(current.slice(-100), null, 2), "utf8");
+  try {
+    await appendJsonLine(auditLogPath, redact(record));
+    await serialize(memoryStorePath, async () => {
+      const current = readMemorySnapshot();
+      current.push(result.memoryUpdate);
+      await atomicWriteJson(memoryStorePath, current.slice(-100));
+    });
+  } catch (error) {
+    persistenceHealthy = false;
+    throw new HttpError(503, "Run persistence failed; inspect audit records before retrying");
+  }
 }
 
 async function readRecentRuns(limit = 25) {
+  return (await readRecentJsonLines(auditLogPath, Math.min(500, limit * 2))).filter((record) => record.runId).slice(0, limit);
+}
+
+async function readinessChecks() {
+  let staticAssets = true;
+  let auditPersistence = persistenceHealthy;
+  try { await Promise.all(["index.html", "app.js", "styles.css"].map((name) => access(join(publicDir, name)))); } catch { staticAssets = false; }
+  const probe = join(dataDir, `.readiness-${crypto.randomUUID()}`);
   try {
-    const raw = await readFile(auditLogPath, "utf8");
-    return raw
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .slice(-limit)
-      .reverse()
-      .map((line) => JSON.parse(line));
-  } catch (error) {
-    if (error?.code === "ENOENT") return [];
-    throw error;
-  }
+    const file = await open(probe, "wx", 0o600);
+    try { await file.writeFile("ready"); await file.sync(); } finally { await file.close(); }
+  } catch { auditPersistence = false; }
+  finally { await rm(probe, { force: true }).catch(() => {}); }
+  return { staticAssets, auditPersistence, acceptingRequests: !draining };
+}
+
+function acquireIncident(incidentKey) {
+  if (!persistenceHealthy) throw new HttpError(503, "Audit persistence unavailable; restore storage and restart before running remediation");
+  if (activeIncidents.has(incidentKey)) throw new HttpError(409, "An analysis for this incident is already running");
+  if (activeIncidents.size >= 4) throw new HttpError(503, "Analysis capacity reached; retry shortly");
+  activeIncidents.add(incidentKey);
+  return () => activeIncidents.delete(incidentKey);
+}
+
+async function runIncident(body, requestId) {
+  const release = acquireIncident(body.incidentKey);
+  try {
+    const result = await orchestrateIncident(body, requestId);
+    await persistRun(result);
+    return result;
+  } finally { release(); }
 }
 
 async function realtimeStatus(requestId) {
@@ -2065,7 +2168,7 @@ function syntheticMonitorStatus() {
 function syntheticTargetUrl() {
   if (syntheticMonitor.targetUrl) return syntheticMonitor.targetUrl;
   const connectHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  return `http://${connectHost}:${port}/demo-store`;
+  return `http://${connectHost}:${server.address()?.port || port}/demo-store`;
 }
 
 function startSyntheticMonitor() {
@@ -2126,7 +2229,7 @@ async function buildMcpStatus() {
     return {
       ...mcp,
       liveRequested,
-      status: connectorHealth?.status || (liveRequested ? "live" : mcp.status),
+      status: connectorHealth?.status || (liveRequested ? "not-implemented" : mcp.status),
       health: connectorHealth?.message || (liveRequested ? "health check not implemented" : "simulation mode")
     };
   });
@@ -2181,13 +2284,20 @@ function emitAuditEntry(emit, entry) {
 }
 
 function shutdown(signal) {
+  if (draining) return;
+  draining = true;
+  const deadline = setTimeout(() => { server.closeAllConnections(); process.exit(1); }, 15000);
+  deadline.unref();
   void logger.info("server_shutdown_requested", { signal }).catch(() => {});
   console.log(`${signal} received; closing Trinetra server`);
-  server.close((error) => {
+  server.close(async (error) => {
     if (error) {
       void logger.error("server_shutdown_error", { message: error.message, stack: error.stack }).catch(() => {});
       process.exit(1);
     }
+    // A disconnected SSE client may still have an authorized run in progress.
+    while (activeIncidents.size) await new Promise((resolve) => setTimeout(resolve, 25));
+    await flushWrites();
     process.exit(0);
   });
 }
@@ -2326,7 +2436,7 @@ async function runTriageAgent(incident, adjudication, commander, fallbackRunbook
     commander,
     runbooks: runbookCatalog.map(({ id, title, service, risk, actionType, match, steps }) => ({ id, title, service, risk, actionType, match, steps }))
   }, () => fallback, options);
-  const selected = runbookCatalog.find((book) => book.id === result.matchedRunbookId) || fallbackRunbook || noMatchRunbook;
+  const selected = runbookCatalog.find((book) => book.id === result.matchedRunbookId && (book.service === incident.service || book.service === "*")) || fallbackRunbook || noMatchRunbook;
   return {
     rootCause: String(result.rootCause || fallback.rootCause),
     confidence: normalizeConfidence(result.confidence, fallback.confidence),
@@ -2496,7 +2606,7 @@ async function runToolCallingRemediationAgent(incident, triage, gate, specialist
         timeline.push({ status: "blocked", label: `Skipped duplicate tool: ${call.name}()`, detail: dedupeResult.message });
         continue;
       }
-      if (!remediationTools[call.name]) {
+      if (!Object.hasOwn(remediationTools, call.name)) {
         const rejected = {
           tool: call.name,
           success: false,
@@ -2666,6 +2776,7 @@ async function askRemediationToolAgent(incident, triage, gate, specialists, tran
     ].join(" ")
   }, () => fallbackStep, options);
   const modelToolCalls = normalizeToolCalls(result.toolCalls || result.tools || result.tool_calls || []);
+  if (runtimePolicy.production && !modelToolCalls.length && fallbackStep.toolCalls.length) throw new HttpError(502, "Model provided no valid remediation tools; start a new review");
   const toolCalls = modelToolCalls.length ? modelToolCalls : normalizeToolCalls(fallbackStep.toolCalls);
   return {
     ...result,
@@ -2719,6 +2830,7 @@ function nextFallbackToolStep(fallback, transcript) {
 function normalizeToolCalls(toolCalls) {
   if (!Array.isArray(toolCalls)) return [];
   return toolCalls
+    .filter((call) => typeof call === "string" || (call && typeof call === "object" && !Array.isArray(call)))
     .map((call) => {
       if (typeof call === "string") return { name: call, args: {}, reason: "" };
       return {
@@ -2840,7 +2952,7 @@ function chooseGate(commander, runbook, triage, approval, approverId, approvalSo
   const realBlastRadius = isRealBlastRadius(commander.blastRadius);
   const authorizedApproval = approval === "approved" && (slackApproverAllowlist.includes(approverId) || approvalSource === "local-console");
   const approvalActor = approvalSource === "local-console" ? "local console reviewer" : approverId;
-  if (highConfidence && allowedRunbook && runbook.risk === "low" && !realBlastRadius && commander.severity !== "P1") {
+  if (!runtimePolicy.production && highConfidence && allowedRunbook && runbook.risk === "low" && !realBlastRadius && commander.severity !== "P1") {
     return {
       kind: "auto",
       label: "Auto-execute approved low-risk runbook",
@@ -2929,33 +3041,18 @@ function verifyOutcome(incident, gate, remediationPlan = null) {
     };
   }
 
-  const improved = remediation.after || { ...incident.metrics };
-  if (improved.errorRate) improved.errorRate = Number(Math.max(0.2, improved.errorRate * 0.22).toFixed(1));
-  if (improved.p95LatencyMs) improved.p95LatencyMs = Math.round(improved.p95LatencyMs * 0.48);
-  if (improved.diskUsedPct) improved.diskUsedPct = Math.round(improved.diskUsedPct * 0.82);
-  if (improved.saturation) improved.saturation = Math.round(improved.saturation * 0.7);
-  const forcedFailure = process.env.FORCE_VERIFICATION_FAIL === incident.id || process.env.FORCE_VERIFICATION_FAIL === "all";
-  if (forcedFailure) {
-    return {
-      status: "Verification failed; rollback triggered",
-      confidence: 0.74,
-      after: incident.metrics,
-      reason: `Health signal failed to recover within ${verificationTimeoutMs}ms`,
-      rollbackTriggered: true,
-      rollbackStatus: `${gate.runbook?.id || "runbook"} rollback executed; on-call escalated`
-    };
-  }
   return {
-    status: "Fix verified; leading indicators recovered",
-    confidence: 0.93,
-    after: improved,
-    reason: `${remediation.action} completed; triggering health signal recovered within ${verificationTimeoutMs}ms`,
+    status: "Simulation only; no live remediation or recovery verification",
+    simulated: true,
+    confidence: null,
+    after: { ...incident.metrics },
+    reason: "This infrastructure adapter is not implemented. No target was mutated and no recovery measurements were collected.",
     rollbackTriggered: false
   };
 }
 
 function executeRemediation(incident, gate, remediationPlan = null) {
-  if (remediationPlan?.service === "demo-storefront" || remediationPlan?.toolsExecuted) {
+  if (incident.service === "demo-storefront" && remediationPlan?.toolsExecuted) {
     return {
       executed: remediationPlan.status === "resolved",
       dryRun: remediationPlan.dryRun || false,
@@ -3087,10 +3184,11 @@ function normalizeConfidence(value, fallback) {
 
 function simulatedRemediation(incident, gate, action) {
   return {
-    executed: true,
+    executed: false,
+    simulated: true,
     service: incident.service,
     action,
-    status: `${gate.runbook?.id || "runbook"} action executed through simulated MCP adapter`,
+    status: `${gate.runbook?.id || "runbook"} action planned by simulated MCP adapter`,
     after: { ...incident.metrics }
   };
 }

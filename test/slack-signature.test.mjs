@@ -56,7 +56,9 @@ describe("POST /api/slack/interactions", () => {
   });
 
   it("returns 200 ephemeral text for a valid signature with an allowlisted approver", async () => {
-    const body = slackApprovalBody({ requestId: "req-valid" });
+    const primed = await request(server.port, "/api/incidents/analyze", { method: "POST", body: JSON.stringify({ incidentKey: "website" }) });
+    assert.equal(primed.json().gate.kind, "human");
+    const body = slackApprovalBody({ requestId: primed.json().requestId });
     const res = await request(server.port, "/api/slack/interactions", {
       method: "POST",
       body,
